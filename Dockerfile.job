@@ -1,0 +1,25 @@
+FROM golang:1.26-alpine AS build-stage
+
+WORKDIR /app
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY internal/adapters/db ./internal/adapters/db
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -trimpath \
+    -buildvcs=false \
+    -ldflags='-w -s' \
+    -o /job ./cmd/job
+
+FROM gcr.io/distroless/static-debian12 AS build-release-stage
+
+WORKDIR /
+
+COPY --from=build-stage /job /job
+
+USER nonroot:nonroot
+
+ENTRYPOINT ["/job"]
