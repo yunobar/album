@@ -1,0 +1,37 @@
+# VCS / IDE
+.git
+.gitignore
+.github
+.vscode
+
+# Local binaries & build outputs
+bin
+tmp
+*.out
+
+# DB migrations / dumps (if not needed in image)
+db
+
+# Proto files (if already generated in /gen, otherwise keep)
+proto
+
+# Env & secrets
+.env
+.env.*
+*.pem
+*.key
+.secrets
+
+# Docs
+*.md
+LICENSE
+bruno
+docs
+
+# Docker-related
+Dockerfile
+docker-compose*.yml
+
+# Local only scripts and configs
+Makefile
+.golangci.yml

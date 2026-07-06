@@ -1,0 +1,59 @@
+name: 'Setup Go with Cache'
+
+description: 'Setup Go environment with module caching'
+
+inputs:
+  go-version:
+    description: 'Go version to use'
+    required: false
+    default: ''
+  go-version-file:
+    description: 'Path to go.mod file for version'
+    required: false
+    default: ''
+
+outputs:
+  go-version:
+    description: 'The installed Go version'
+    value: ${{ steps.setup.outputs.go-version }}
+
+runs:
+  using: 'composite'
+  steps:
+  - name: Set up Go
+    id: setup
+    uses: actions/setup-go@v5
+    with:
+      go-version: ${{ inputs.go-version }}
+      go-version-file: ${{ inputs.go-version-file }}
+
+  - name: Resolve Go paths
+    id: paths
+    shell: bash
+    run: |
+      echo "gocache=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+      echo "gomodcache=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+
+  - name: Cache Go modules
+    uses: actions/cache@v4
+    with:
+      path: |
+        ${{ steps.paths.outputs.gocache }}
+        ${{ steps.paths.outputs.gomodcache }}
+      key: ${{ runner.os }}-go-${{ steps.setup.outputs.go-version }}-${{ hashFiles('**/go.sum') }}
+      restore-keys: |
+        ${{ runner.os }}-go-${{ steps.setup.outputs.go-version }}-
+
+  - name: Download dependencies
+    shell: bash
+    run: |
+      go mod download
+      if [ -d "test" ]; then
+        cd test && go mod download
+      fi
+
+  - name: Generate docs
+    shell: bash
+    run: |
+      go install github.com/swaggo/swag/cmd/swag@latest
+      make docs
