@@ -1,0 +1,43 @@
+all: false
+dir: internal/mocks
+filename: "mock_{{.InterfaceName | snakecase}}.go"
+force-file-write: true
+formatter: goimports
+log-level: info
+structname: "Mock{{.InterfaceName}}"
+pkgname: mocks
+template: testify
+packages:
+  github.com/itsLeonB/go-crud:
+    interfaces:
+      Repository:
+        config:
+          all: true
+      Transactor:
+        config:
+          all: true
+  github.com/yunobar/album/internal/core/mail:
+    interfaces:
+      MailService:
+        config:
+          all: true
+  github.com/yunobar/album/internal/core/store:
+    interfaces:
+      StateStore:
+        config:
+          all: true
+  github.com/yunobar/album/internal/core/cache:
+    interfaces:
+      Cache:
+        config:
+          all: true
+  github.com/yunobar/album/internal/domain/service:
+    interfaces:
+      ProfileService:
+        config:
+          all: true
+  github.com/nats-io/nats.go/jetstream:
+    interfaces:
+      KeyValue:
+        config:
+          all: true
