@@ -5,5 +5,6 @@ const (
 	ErrDataUpdate = "error updating data"
 	ErrDataInsert = "error inserting new data"
 
-	ErrCaptchaFailed = "captcha verification failed"
+	ErrCaptchaFailed    = "captcha verification failed"
+	ErrTMDBSearchFailed = "tmdb search failed"
 )

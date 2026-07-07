@@ -22,6 +22,7 @@ internal/
   appconstant/   → Application-wide constants and enums
   core/          → Framework/infra layer (config, logger, otel, services like cache/mail)
   domain/
+    client/      → External API clients (interfaces + implementations that call third-party endpoints)
     dto/         → Request/response data transfer objects
     entity/      → Domain entities (DB models via go-crud)
     mapper/      → Entity ↔ DTO conversion functions
@@ -44,6 +45,7 @@ internal/
 ### Naming
 
 - Service implementations: `<name>ServiceImpl` struct, `New<Name>Service` constructor.
+- External API clients: anything that makes requests to a third-party endpoint (HTTP, etc.) is named `<Name>Client` / `<name>_client.go` and lives in `internal/domain/client/`, never `internal/domain/service/`. `<name>Client` struct, `New<Name>Client` constructor. Name the client after the provider (`TMDBClient`, `TurnstileClient`), not the domain concept it serves — services in `service/` consume the client interface for their business logic.
 - Handlers: `<Name>Handler` struct with `Handle<Action>()` methods returning `gin.HandlerFunc`.
 - DTOs: `<Action>Request` / `<Action>Response` in the `dto` package.
 - Mappers: standalone functions in `mapper/`, named `<Entity>To<DTO>` or `<DTO>To<Entity>`.
@@ -66,7 +68,8 @@ internal/
 | Layer | Package | What's real | What's mocked |
 |-------|---------|-------------|---------------|
 | Repository | `internal/domain/repository/` | Test DB | — |
-| Service | `internal/domain/service/` | Service logic | Repos, core services (mockery) |
+| Client | `internal/domain/client/` | Request/response mapping logic | External endpoint (`httptest.Server`, or mockery for consumers) |
+| Service | `internal/domain/service/` | Service logic | Repos, clients, core services (mockery) |
 | Mapper | `internal/domain/mapper/` | Stateless in/out | — |
 | Core | `internal/core/*/` | Core service logic | External deps (mockery) |
 | Handler | `internal/adapters/http/handler/` | Gin test context | Services (mockery) |

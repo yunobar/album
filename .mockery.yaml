@@ -36,6 +36,11 @@ packages:
       ProfileService:
         config:
           all: true
+  github.com/yunobar/album/internal/domain/client:
+    interfaces:
+      TMDBClient:
+        config:
+          all: true
   github.com/nats-io/nats.go/jetstream:
     interfaces:
       KeyValue:

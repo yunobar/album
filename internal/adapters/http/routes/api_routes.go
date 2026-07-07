@@ -53,6 +53,16 @@ func RegisterAPIRoutes(router *gin.Engine, handlers *handler.Handlers, authMiddl
 					profileRoutes.GET("", handlers.Profile.HandleProfile())
 					profileRoutes.PATCH("", handlers.Profile.HandleUpdate())
 				}
+
+				contentRoutes := protectedRoutes.Group("/content")
+				contentRoutes.Use(sentinelGin.RateLimit(httpserver.RateLimitConfig{
+					Limit:   rate.Limit(5),
+					Burst:   10,
+					KeyFunc: httpserver.KeyFuncByIP(),
+				}))
+				{
+					contentRoutes.GET("/search", handlers.Content.HandleSearch())
+				}
 			}
 		}
 	}

@@ -11,6 +11,7 @@ import (
 type Handlers struct {
 	Auth    *authgin.Handler
 	Profile *ProfileHandler
+	Content *ContentHandler
 
 	emailLimiter *middlewares.ValueLimiter
 }
@@ -30,6 +31,7 @@ func ProvideHandlers(services *provider.Services, transport *authgin.CookieTrans
 	return &Handlers{
 		Auth:    authHandler,
 		Profile: NewProfileHandler(services.Profile),
+		Content: NewContentHandler(services.Content),
 
 		emailLimiter: emailLimiter,
 	}

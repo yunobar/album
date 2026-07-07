@@ -1,4 +1,4 @@
-package service
+package client
 
 import (
 	"context"
@@ -14,32 +14,32 @@ import (
 	"github.com/yunobar/album/internal/core/logger"
 )
 
-type CaptchaService interface {
+type TurnstileClient interface {
 	Verify(ctx context.Context, token string) error
 }
 
-type turnstileService struct {
+type turnstileClient struct {
 	secretKey  string
 	httpClient *http.Client
 	verifyURL  string
 }
 
-type noopCaptchaService struct{}
+type noopTurnstileClient struct{}
 
 const turnstileVerifyURL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
 
-func NewTurnstileService(secretKey string) CaptchaService {
+func NewTurnstileClient(secretKey string) TurnstileClient {
 	if secretKey == "" {
-		return &noopCaptchaService{}
+		return &noopTurnstileClient{}
 	}
-	return &turnstileService{secretKey: secretKey, httpClient: &http.Client{Timeout: 10 * time.Second}, verifyURL: turnstileVerifyURL}
+	return &turnstileClient{secretKey: secretKey, httpClient: &http.Client{Timeout: 10 * time.Second}, verifyURL: turnstileVerifyURL}
 }
 
-func NewTurnstileServiceWithURL(secretKey, verifyURL string) CaptchaService {
-	return &turnstileService{secretKey: secretKey, httpClient: &http.Client{Timeout: 10 * time.Second}, verifyURL: verifyURL}
+func NewTurnstileClientWithURL(secretKey, verifyURL string) TurnstileClient {
+	return &turnstileClient{secretKey: secretKey, httpClient: &http.Client{Timeout: 10 * time.Second}, verifyURL: verifyURL}
 }
 
-func (ts *turnstileService) Verify(ctx context.Context, token string) error {
+func (ts *turnstileClient) Verify(ctx context.Context, token string) error {
 	form := url.Values{
 		"secret":   {ts.secretKey},
 		"response": {token},
@@ -72,7 +72,7 @@ func (ts *turnstileService) Verify(ctx context.Context, token string) error {
 	return nil
 }
 
-func (n *noopCaptchaService) Verify(_ context.Context, _ string) error {
+func (n *noopTurnstileClient) Verify(_ context.Context, _ string) error {
 	logger.Warn("captcha verification is disabled, set a valid turnstile key")
 	return nil
 }

@@ -1,0 +1,55 @@
+info:
+  name: Register
+  type: http
+  seq: 1
+
+http:
+  method: POST
+  url: "{{baseUrl}}/api/v1/auth/register"
+  body:
+    type: json
+    data: |-
+      {
+        "email": "test@example.com",
+        "password": "test123",
+        "passwordConfirmation": "test123"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+
+examples:
+  - name: Success
+    request:
+      url: "{{baseUrl}}/api/v1/auth/register"
+      method: POST
+      body:
+        type: json
+        data: |-
+          {
+            "email": "test@example.com",
+            "password": "test123",
+            "passwordConfirmation": "test123"
+          }
+    response:
+      status: 201
+      statusText: Created
+      headers:
+        - name: content-type
+          value: application/json; charset=utf-8
+        - name: date
+          value: Thu, 25 Jun 2026 13:55:29 GMT
+        - name: content-length
+          value: "56"
+      body:
+        type: json
+        data: |-
+          {
+            "data": {
+              "message": "success registering, please login"
+            }
+          }
