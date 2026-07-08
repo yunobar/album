@@ -5,7 +5,11 @@ info:
 
 http:
   method: GET
-  url: "{{baseUrl}}/api/v1/content/search"
+  url: "{{baseUrl}}/api/v1/content/search?q=spongebob"
+  params:
+    - name: q
+      value: spongebob
+      type: query
   auth: inherit
 
 settings:
