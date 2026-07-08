@@ -19,6 +19,9 @@ type Repositories struct {
 
 	// Content
 	Content crud.Repository[entity.Content]
+
+	// Watchlist
+	Watchlist crud.Repository[entity.WatchlistItem]
 }
 
 func ProvideRepositories(db *gorm.DB) *Repositories {
@@ -33,5 +36,7 @@ func ProvideRepositories(db *gorm.DB) *Repositories {
 		RefreshToken:       crud.NewRepository[entity.RefreshToken](db),
 
 		Content: crud.NewRepository[entity.Content](db),
+
+		Watchlist: crud.NewRepository[entity.WatchlistItem](db),
 	}
 }

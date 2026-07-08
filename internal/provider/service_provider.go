@@ -24,6 +24,9 @@ type Services struct {
 
 	// Content
 	Content service.ContentService
+
+	// Watchlist
+	Watchlist service.WatchlistService
 }
 
 func (s *Services) Shutdown() error {
@@ -44,6 +47,8 @@ func ProvideServices(
 	tmdbClient := client.NewTMDBClient(config.Global.BaseUrl, config.Global.TMDB.ApiKey)
 	content := service.NewContentService(repos.Transactor, repos.Content, tmdbClient)
 
+	watchlist := service.NewWatchlistService(repos.Transactor, repos.Watchlist, repos.Content)
+
 	return &Services{
 		AuthKit: kit,
 		Captcha: client.NewTurnstileClient(config.Global.TurnstileSecretKey),
@@ -51,6 +56,8 @@ func ProvideServices(
 		Profile: profile,
 
 		Content: content,
+
+		Watchlist: watchlist,
 	}, nil
 }
 

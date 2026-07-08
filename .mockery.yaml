@@ -36,6 +36,9 @@ packages:
       ProfileService:
         config:
           all: true
+      WatchlistService:
+        config:
+          all: true
   github.com/yunobar/album/internal/domain/client:
     interfaces:
       TMDBClient:
