@@ -25,6 +25,7 @@ type Config struct {
 	OAuthProviders
 	NATS
 	OTel
+	TMDB
 }
 
 var Global *Config
@@ -67,6 +68,11 @@ func Load() error {
 		errs = errors.Join(errs, err)
 	}
 
+	tmdb, err := load[TMDB]()
+	if err != nil {
+		errs = errors.Join(errs, err)
+	}
+
 	if errs != nil {
 		return ungerr.Wrap(errs, "error loading config")
 	}
@@ -79,6 +85,7 @@ func Load() error {
 		oAuthProviders,
 		nats,
 		otel,
+		tmdb,
 	}
 
 	return nil

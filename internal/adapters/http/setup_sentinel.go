@@ -10,6 +10,31 @@ import (
 )
 
 func setupSentinel(router *gin.Engine, skipPaths []string, logger zerolog.Logger) error {
+	corsCfg := httpserver.CORSConfig{
+		AllowedOrigins: config.Global.ClientUrls,
+		AllowedMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowedHeaders: []string{
+			"Origin",
+			"Content-Type",
+			"Accept",
+			"Authorization",
+			"X-Requested-With",
+			"Content-Length",
+			"Accept-Encoding",
+			"X-CSRF-Token",
+			"Cache-Control",
+			"Referer",
+			"User-Agent",
+			"range",
+			"DNT",
+			"sec-ch-ua",
+			"sec-ch-ua-platform",
+			"sec-ch-ua-mobile",
+		},
+		ExposedHeaders:   []string{"Content-Length", "X-Total-Count"},
+		AllowCredentials: true,
+	}
+
 	metricsCfg := httpserver.DefaultMetricsConfig()
 	metricsCfg.SkipPaths = skipPaths
 
@@ -29,9 +54,17 @@ func setupSentinel(router *gin.Engine, skipPaths []string, logger zerolog.Logger
 		// 	Logger:    logger,
 		// 	SkipPaths: []string{"/ping", "/livez", "/readyz", "/metrics"},
 		// }),
+		sentinelGin.CORS(corsCfg),
 		sentinelGin.Timeout(config.Global.Timeout),
 		sentinelGin.Metrics(metrics),
-		sentinelGin.RateLimit(httpserver.DefaultRateLimitConfig()),
+		sentinelGin.RateLimit(httpserver.RateLimitConfig{
+			// ponytail: per-IP global limit. 100 req/s burst 200 is generous for
+			// legitimate users but stops single-IP floods. Ceiling: doesn't help
+			// distributed DDoS. Upgrade path: Redis-backed limiter + WAF.
+			Limit:   100,
+			Burst:   200,
+			KeyFunc: httpserver.KeyFuncByIP(),
+		}),
 	)
 
 	return nil

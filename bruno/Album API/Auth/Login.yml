@@ -1,0 +1,71 @@
+info:
+  name: Login
+  type: http
+  seq: 2
+
+http:
+  method: POST
+  url: "{{baseUrl}}/api/v1/auth/login"
+  body:
+    type: json
+    data: |-
+      {
+        "email": "test@example.com",
+        "password": "test123"
+      }
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: after-response
+      code: |-
+        // Ensure the response exists and has data
+        if (res.status === 200 && res.body) {
+          const accessToken = res.body.data?.accessToken;
+
+          if (accessToken) {
+            // Set the variable to the current environment
+            bru.setEnvVar("accessToken", accessToken);
+            console.log("Successfully set temp_secret!");
+          } else {
+            console.error("accessToken not found in the response body.");
+          }
+        }
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+
+examples:
+  - name: Success
+    request:
+      url: "{{baseUrl}}/api/v1/auth/login"
+      method: POST
+      body:
+        type: json
+        data: |-
+          {
+            "email": "test@example.com",
+            "password": "test123"
+          }
+    response:
+      status: 200
+      statusText: OK
+      headers:
+        - name: content-type
+          value: application/json; charset=utf-8
+        - name: date
+          value: Thu, 25 Jun 2026 13:56:25 GMT
+        - name: content-length
+          value: "565"
+      body:
+        type: json
+        data: |-
+          {
+            "data": {
+              "accessToken": "<JWT_ACCESS_TOKEN>",
+              "refreshToken": "<REFRESH_TOKEN>"
+            }
+          }

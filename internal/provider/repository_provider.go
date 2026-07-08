@@ -16,6 +16,9 @@ type Repositories struct {
 	OAuthAccount       crud.Repository[entity.OAuthAccount]
 	Session            crud.Repository[entity.Session]
 	RefreshToken       crud.Repository[entity.RefreshToken]
+
+	// Content
+	Content crud.Repository[entity.Content]
 }
 
 func ProvideRepositories(db *gorm.DB) *Repositories {
@@ -28,5 +31,7 @@ func ProvideRepositories(db *gorm.DB) *Repositories {
 		OAuthAccount:       crud.NewRepository[entity.OAuthAccount](db),
 		Session:            crud.NewRepository[entity.Session](db),
 		RefreshToken:       crud.NewRepository[entity.RefreshToken](db),
+
+		Content: crud.NewRepository[entity.Content](db),
 	}
 }

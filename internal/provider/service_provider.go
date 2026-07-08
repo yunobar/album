@@ -10,16 +10,20 @@ import (
 	"github.com/yunobar/album/internal/core/cache"
 	"github.com/yunobar/album/internal/core/config"
 	"github.com/yunobar/album/internal/core/otel"
+	"github.com/yunobar/album/internal/domain/client"
 	"github.com/yunobar/album/internal/domain/service"
 )
 
 type Services struct {
 	// Auth
 	AuthKit *authkit.AuthKit
-	Captcha service.CaptchaService
+	Captcha client.TurnstileClient
 
 	// Users
 	Profile service.ProfileService
+
+	// Content
+	Content service.ContentService
 }
 
 func (s *Services) Shutdown() error {
@@ -37,11 +41,16 @@ func ProvideServices(
 		return nil, err
 	}
 
+	tmdbClient := client.NewTMDBClient(config.Global.BaseUrl, config.Global.TMDB.ApiKey)
+	content := service.NewContentService(repos.Transactor, repos.Content, tmdbClient)
+
 	return &Services{
 		AuthKit: kit,
-		Captcha: service.NewTurnstileService(config.Global.TurnstileSecretKey),
+		Captcha: client.NewTurnstileClient(config.Global.TurnstileSecretKey),
 
 		Profile: profile,
+
+		Content: content,
 	}, nil
 }
 

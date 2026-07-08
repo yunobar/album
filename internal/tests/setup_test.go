@@ -26,6 +26,10 @@ var (
 
 	testProfileID = uuid.MustParse("00000000-0000-0000-0000-000000000002")
 	testUserID    = uuid.MustParse("00000000-0000-0000-0000-000000000001")
+
+	// currentContentService is swapped per-subtest so each test case can inject
+	// its own mock TMDBClient without re-registering routes.
+	currentContentService service.ContentService
 )
 
 func TestMain(m *testing.M) {
@@ -92,6 +96,23 @@ func registerTestRoutes(r *gin.Engine, db *gorm.DB) {
 			return
 		}
 		resp, err := profileSvc.Update(c.Request.Context(), dto.UpdateProfileRequest{ID: profileID, Name: req.Name})
+		if err != nil {
+			_ = c.Error(err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"data": resp})
+	})
+
+	// Content
+	api.GET("/content/search", func(c *gin.Context) {
+		var req struct {
+			Query string `form:"q" binding:"required"`
+		}
+		if err := c.ShouldBindQuery(&req); err != nil {
+			_ = c.Error(ungerr.Wrap(err, "validation"))
+			return
+		}
+		resp, err := currentContentService.Search(c.Request.Context(), req.Query)
 		if err != nil {
 			_ = c.Error(err)
 			return
