@@ -72,7 +72,7 @@ func (cs *contentServiceImpl) Search(ctx context.Context, query string) ([]dto.C
 	return responses, nil
 }
 
-// upsertMany batches all results into a single INSERT ... ON CONFLICT (source, source_id)
+// upsertMany batches all results into a single INSERT ... ON CONFLICT (source, source_id, content_type)
 // DO UPDATE, dropping past crud.Repository[T] (which has no upsert primitive) via
 // GetGormInstance. created_at is left untouched on conflict so re-searching a title
 // never resets its original insert time.

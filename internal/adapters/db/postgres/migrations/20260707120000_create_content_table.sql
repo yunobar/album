@@ -9,7 +9,7 @@ CREATE TABLE content (
     content_type text NOT NULL,
     title text NOT NULL,
     release_year integer,
-    poster_url text,
+    poster_url text NOT NULL DEFAULT '',
     metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
     CONSTRAINT content_source_source_id_content_type_unique UNIQUE (source, source_id, content_type)
 );

@@ -9,6 +9,7 @@ import (
 
 	"github.com/itsLeonB/ungerr"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/yunobar/album/internal/core/logger"
 )
 
@@ -43,7 +44,7 @@ func TestTurnstileClient_Verify_Failure(t *testing.T) {
 
 	assert.Error(t, err)
 	var appErr ungerr.AppError
-	assert.ErrorAs(t, err, &appErr)
+	require.ErrorAs(t, err, &appErr)
 	assert.Equal(t, "captcha verification failed", appErr.Details())
 }
 
