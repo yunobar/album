@@ -26,6 +26,14 @@ type Repositories struct {
 	// Groups
 	Group       crud.Repository[entity.Group]
 	GroupMember crud.Repository[entity.GroupMember]
+
+	// Decision Engine
+	DecisionSession         crud.Repository[entity.DecisionSession]
+	SessionParticipant      crud.Repository[entity.SessionParticipant]
+	SessionCandidate        crud.Repository[entity.SessionCandidate]
+	SessionVote             crud.Repository[entity.SessionVote]
+	SessionRanking          crud.Repository[entity.SessionRanking]
+	SessionPrioritySnapshot crud.Repository[entity.SessionPrioritySnapshot]
 }
 
 func ProvideRepositories(db *gorm.DB) *Repositories {
@@ -45,5 +53,12 @@ func ProvideRepositories(db *gorm.DB) *Repositories {
 
 		Group:       crud.NewRepository[entity.Group](db),
 		GroupMember: crud.NewRepository[entity.GroupMember](db),
+
+		DecisionSession:         crud.NewRepository[entity.DecisionSession](db),
+		SessionParticipant:      crud.NewRepository[entity.SessionParticipant](db),
+		SessionCandidate:        crud.NewRepository[entity.SessionCandidate](db),
+		SessionVote:             crud.NewRepository[entity.SessionVote](db),
+		SessionRanking:          crud.NewRepository[entity.SessionRanking](db),
+		SessionPrioritySnapshot: crud.NewRepository[entity.SessionPrioritySnapshot](db),
 	}
 }

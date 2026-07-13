@@ -267,7 +267,7 @@ func (gs *groupServiceImpl) GetMergedWatchlist(ctx context.Context, profileID, g
 		       c.poster_url   AS poster_url
 		FROM group_members gm
 		JOIN watchlist_items wi ON wi.profile_id = gm.profile_id AND wi.status = ?
-		JOIN content c ON c.id = wi.content_id
+		JOIN contents c ON c.id = wi.content_id
 		WHERE gm.group_id = ?
 		  AND (? = 'all' OR c.content_type = ?)
 	`, appconstant.WatchlistStatusActive, groupID, filter, filter).Scan(&rows).Error
