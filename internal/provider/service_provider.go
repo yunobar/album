@@ -27,6 +27,9 @@ type Services struct {
 
 	// Watchlist
 	Watchlist service.WatchlistService
+
+	// Groups
+	Group service.GroupService
 }
 
 func (s *Services) Shutdown() error {
@@ -48,6 +51,7 @@ func ProvideServices(
 	content := service.NewContentService(repos.Transactor, repos.Content, tmdbClient)
 
 	watchlist := service.NewWatchlistService(repos.Transactor, repos.Watchlist, repos.Content)
+	group := service.NewGroupService(repos.Transactor, repos.Group, repos.GroupMember, repos.Profile)
 
 	return &Services{
 		AuthKit: kit,
@@ -58,6 +62,8 @@ func ProvideServices(
 		Content: content,
 
 		Watchlist: watchlist,
+
+		Group: group,
 	}, nil
 }
 
