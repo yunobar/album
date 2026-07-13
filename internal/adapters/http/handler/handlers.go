@@ -13,6 +13,7 @@ type Handlers struct {
 	Profile   *ProfileHandler
 	Content   *ContentHandler
 	Watchlist *WatchlistHandler
+	Group     *GroupHandler
 
 	emailLimiter *middlewares.ValueLimiter
 }
@@ -34,6 +35,7 @@ func ProvideHandlers(services *provider.Services, transport *authgin.CookieTrans
 		Profile:   NewProfileHandler(services.Profile),
 		Content:   NewContentHandler(services.Content),
 		Watchlist: NewWatchlistHandler(services.Watchlist),
+		Group:     NewGroupHandler(services.Group),
 
 		emailLimiter: emailLimiter,
 	}

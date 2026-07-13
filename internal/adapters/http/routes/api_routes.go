@@ -72,6 +72,15 @@ func RegisterAPIRoutes(router *gin.Engine, handlers *handler.Handlers, authMiddl
 					watchlistRoutes.PATCH("/:"+appconstant.ContextContentID.String(), handlers.Watchlist.HandleUpdate())
 					watchlistRoutes.DELETE("/:"+appconstant.ContextContentID.String(), handlers.Watchlist.HandleRemove())
 				}
+
+				groupRoutes := protectedRoutes.Group("/groups")
+				{
+					groupRoutes.POST("", handlers.Group.HandleCreate())
+					groupRoutes.GET("", handlers.Group.HandleList())
+					groupRoutes.GET("/:"+appconstant.ContextGroupID.String(), handlers.Group.HandleGet())
+					groupRoutes.POST("/join/:"+appconstant.ContextToken.String(), handlers.Group.HandleJoin())
+					groupRoutes.GET("/:"+appconstant.ContextGroupID.String()+"/watchlist", handlers.Group.HandleMergedWatchlist())
+				}
 			}
 		}
 	}

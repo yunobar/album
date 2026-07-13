@@ -1,0 +1,337 @@
+package tests
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/yunobar/album/internal/domain/dto"
+	"github.com/yunobar/album/internal/domain/entity"
+	"github.com/yunobar/album/internal/testhelpers"
+)
+
+func TestGroupCreate(t *testing.T) {
+	testhelpers.RequireTestDB(t, testDB)
+
+	t.Run("creates a group with no name, auto-joins the creator, derives a default name", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodPost, "/api/v1/groups", strings.NewReader(`{}`))
+		req.Header.Set("Content-Type", "application/json")
+		testRouter.ServeHTTP(w, req)
+		require.Equal(t, http.StatusCreated, w.Code)
+
+		var resp struct {
+			Data dto.GroupResponse `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.Equal(t, "New group", resp.Data.Name)
+		assert.NotEmpty(t, resp.Data.InviteToken)
+		require.Len(t, resp.Data.Members, 1)
+		assert.Equal(t, testProfileID, resp.Data.Members[0].ID)
+		assert.Equal(t, "Test User", resp.Data.Members[0].Name)
+
+		var members []entity.GroupMember
+		require.NoError(t, testDB.Find(&members).Error)
+		require.Len(t, members, 1)
+		assert.Equal(t, testProfileID, members[0].ProfileID)
+	})
+
+	t.Run("creates a named group", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodPost, "/api/v1/groups", strings.NewReader(`{"name":"Movie Night"}`))
+		req.Header.Set("Content-Type", "application/json")
+		testRouter.ServeHTTP(w, req)
+		require.Equal(t, http.StatusCreated, w.Code)
+
+		var resp struct {
+			Data dto.GroupResponse `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.Equal(t, "Movie Night", resp.Data.Name)
+	})
+}
+
+func TestGroupGet(t *testing.T) {
+	testhelpers.RequireTestDB(t, testDB)
+
+	t.Run("returns detail for a member, deriving the name from the other members", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		bob := seedTestProfile(t, "Bob")
+		group := seedTestGroup(t, nil, testProfileID, bob.ID)
+
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodGet, "/api/v1/groups/"+group.ID.String(), nil)
+		testRouter.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var resp struct {
+			Data dto.GroupResponse `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.Equal(t, "Bob", resp.Data.Name)
+		assert.Len(t, resp.Data.Members, 2)
+	})
+
+	t.Run("404s for a non-member, without confirming the group exists", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		other := seedTestProfile(t, "Other")
+		group := seedTestGroup(t, nil, other.ID)
+
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodGet, "/api/v1/groups/"+group.ID.String(), nil)
+		testRouter.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+
+	t.Run("404s for a group ID that doesn't exist", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodGet, "/api/v1/groups/"+uuid.New().String(), nil)
+		testRouter.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+}
+
+func TestGroupList(t *testing.T) {
+	testhelpers.RequireTestDB(t, testDB)
+
+	t.Run("lists the caller's groups with a per-viewer derived name and member count", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		bob := seedTestProfile(t, "Bob")
+		carol := seedTestProfile(t, "Carol")
+		other := seedTestProfile(t, "Not In This Group")
+
+		g1 := seedTestGroup(t, nil, testProfileID, bob.ID, carol.ID)
+		seedTestGroup(t, nil, other.ID)
+
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodGet, "/api/v1/groups", nil)
+		testRouter.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var resp struct {
+			Data dto.ListGroupsResponse `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		require.Len(t, resp.Data.Groups, 1, "must not include a group the caller isn't a member of")
+		assert.Equal(t, g1.ID, resp.Data.Groups[0].ID)
+		assert.Equal(t, "Bob & Carol", resp.Data.Groups[0].Name)
+		assert.Equal(t, 3, resp.Data.Groups[0].MemberCount)
+	})
+}
+
+func TestGroupJoin(t *testing.T) {
+	testhelpers.RequireTestDB(t, testDB)
+
+	t.Run("joins the group addressed by the token", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		owner := seedTestProfile(t, "Owner")
+		group := seedTestGroup(t, nil, owner.ID)
+
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodPost, "/api/v1/groups/join/"+group.InviteToken, nil)
+		testRouter.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var resp struct {
+			Data dto.GroupResponse `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.Len(t, resp.Data.Members, 2)
+
+		var members []entity.GroupMember
+		require.NoError(t, testDB.Where("group_id = ?", group.ID).Find(&members).Error)
+		assert.Len(t, members, 2)
+	})
+
+	t.Run("joining twice is idempotent — 200, not 409, and no duplicate row", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		group := seedTestGroup(t, nil, testProfileID)
+
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodPost, "/api/v1/groups/join/"+group.InviteToken, nil)
+		testRouter.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+
+		var members []entity.GroupMember
+		require.NoError(t, testDB.Where("group_id = ?", group.ID).Find(&members).Error)
+		require.Len(t, members, 1, "already-a-member join must not insert a duplicate row")
+	})
+
+	t.Run("404s for an unknown token", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodPost, "/api/v1/groups/join/"+uuid.New().String(), nil)
+		testRouter.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+
+	t.Run("concurrent joins by the same profile never error and never duplicate", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		owner := seedTestProfile(t, "Owner")
+		group := seedTestGroup(t, nil, owner.ID)
+
+		const concurrency = 5
+		var wg sync.WaitGroup
+		codes := make([]int, concurrency)
+		for i := range concurrency {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				w := httptest.NewRecorder()
+				req, _ := http.NewRequest(http.MethodPost, "/api/v1/groups/join/"+group.InviteToken, nil)
+				testRouter.ServeHTTP(w, req)
+				codes[i] = w.Code
+			}(i)
+		}
+		wg.Wait()
+
+		for _, code := range codes {
+			assert.Equal(t, http.StatusOK, code, "every concurrent join must succeed idempotently, never error on the UNIQUE constraint race")
+		}
+
+		var members []entity.GroupMember
+		require.NoError(t, testDB.Where("group_id = ?", group.ID).Find(&members).Error)
+		assert.Len(t, members, 2, "concurrent joins by the same profile must not create duplicate rows")
+	})
+}
+
+func TestGroupMergedWatchlist(t *testing.T) {
+	testhelpers.RequireTestDB(t, testDB)
+
+	t.Run("two members adding the same title dedups to one row with interested_count 2 and both priorities", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		bob := seedTestProfile(t, "Bob")
+		group := seedTestGroup(t, nil, testProfileID, bob.ID)
+		content := seedTestContent(t)
+
+		require.NoError(t, testDB.Create(&entity.WatchlistItem{
+			ProfileID: testProfileID,
+			ContentID: content.ID,
+			Priority:  "high",
+			Status:    "active",
+		}).Error)
+		require.NoError(t, testDB.Create(&entity.WatchlistItem{
+			ProfileID: bob.ID,
+			ContentID: content.ID,
+			Priority:  "must",
+			Status:    "active",
+		}).Error)
+
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodGet, "/api/v1/groups/"+group.ID.String()+"/watchlist", nil)
+		testRouter.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var resp struct {
+			Data dto.MergedWatchlistResponse `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		require.Len(t, resp.Data.Items, 1, "the same content_id from two members must dedup to one row")
+		item := resp.Data.Items[0]
+		assert.Equal(t, content.ID, item.Content.ID)
+		assert.Equal(t, 2, item.InterestedCount)
+		assert.ElementsMatch(t, []uuid.UUID{testProfileID, bob.ID}, item.Members)
+		assert.Equal(t, "high", item.Priorities[testProfileID.String()])
+		assert.Equal(t, "must", item.Priorities[bob.ID.String()])
+	})
+
+	t.Run("filter=movie|tv narrows results; watched items and non-member interest are excluded", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		bob := seedTestProfile(t, "Bob")
+		outsider := seedTestProfile(t, "Outsider")
+		group := seedTestGroup(t, nil, testProfileID, bob.ID)
+
+		movie := seedTestContent(t)
+		tv := entity.Content{Source: "tmdb", SourceID: uuid.NewString(), ContentType: "tv", Title: "Test Show", Metadata: json.RawMessage(`{}`)}
+		require.NoError(t, testDB.Create(&tv).Error)
+		watchedMovie := seedTestContent(t)
+
+		require.NoError(t, testDB.Create(&entity.WatchlistItem{ProfileID: testProfileID, ContentID: movie.ID, Priority: "low", Status: "active"}).Error)
+		require.NoError(t, testDB.Create(&entity.WatchlistItem{ProfileID: bob.ID, ContentID: tv.ID, Priority: "low", Status: "active"}).Error)
+		require.NoError(t, testDB.Create(&entity.WatchlistItem{ProfileID: testProfileID, ContentID: watchedMovie.ID, Priority: "low", Status: "watched"}).Error)
+		require.NoError(t, testDB.Create(&entity.WatchlistItem{ProfileID: outsider.ID, ContentID: movie.ID, Priority: "must", Status: "active"}).Error)
+
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodGet, "/api/v1/groups/"+group.ID.String()+"/watchlist?filter=movie", nil)
+		testRouter.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var resp struct {
+			Data dto.MergedWatchlistResponse `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		require.Len(t, resp.Data.Items, 1)
+		assert.Equal(t, movie.ID, resp.Data.Items[0].Content.ID)
+		assert.Equal(t, 1, resp.Data.Items[0].InterestedCount, "a non-member's watchlist entry must not count")
+
+		w2 := httptest.NewRecorder()
+		req2, _ := http.NewRequest(http.MethodGet, "/api/v1/groups/"+group.ID.String()+"/watchlist?filter=tv", nil)
+		testRouter.ServeHTTP(w2, req2)
+		require.Equal(t, http.StatusOK, w2.Code)
+
+		var resp2 struct {
+			Data dto.MergedWatchlistResponse `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(w2.Body.Bytes(), &resp2))
+		require.Len(t, resp2.Data.Items, 1)
+		assert.Equal(t, tv.ID, resp2.Data.Items[0].Content.ID)
+	})
+
+	t.Run("404s for a non-member", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		other := seedTestProfile(t, "Other")
+		group := seedTestGroup(t, nil, other.ID)
+
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodGet, "/api/v1/groups/"+group.ID.String()+"/watchlist", nil)
+		testRouter.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+}
+
+// seedTestGroup creates a group (nil name derives; pass a pointer for a fixed
+// name) and joins each of memberIDs to it in group_members.
+func seedTestGroup(t *testing.T, name *string, memberIDs ...uuid.UUID) entity.Group {
+	t.Helper()
+	group := entity.Group{Name: name, InviteToken: uuid.NewString()}
+	require.NoError(t, testDB.Create(&group).Error)
+	for _, id := range memberIDs {
+		require.NoError(t, testDB.Create(&entity.GroupMember{GroupID: group.ID, ProfileID: id}).Error)
+	}
+	return group
+}
+
+// seedTestProfile creates a standalone user_profiles row (no backing user —
+// user_profiles.user_id is nullable) for use as an "other member" in tests.
+func seedTestProfile(t *testing.T, name string) entity.UserProfile {
+	t.Helper()
+	profile := entity.UserProfile{Name: name}
+	require.NoError(t, testDB.Create(&profile).Error)
+	return profile
+}

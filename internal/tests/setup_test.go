@@ -86,6 +86,7 @@ func registerTestRoutes(r *gin.Engine, db *gorm.DB) {
 	// Services
 	profileSvc := service.NewProfileService(transactor, profileRepo, userRepo)
 	watchlistSvc := service.NewWatchlistService(transactor, crud.NewRepository[entity.WatchlistItem](db), crud.NewRepository[entity.Content](db))
+	groupSvc := service.NewGroupService(transactor, crud.NewRepository[entity.Group](db), crud.NewRepository[entity.GroupMember](db), profileRepo)
 
 	// Routes
 	api := r.Group("/api/v1")
@@ -175,6 +176,63 @@ func registerTestRoutes(r *gin.Engine, db *gorm.DB) {
 			return
 		}
 		c.Status(http.StatusNoContent)
+	})
+
+	// Groups
+	api.POST("/groups", func(c *gin.Context) {
+		var req dto.CreateGroupRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			_ = c.Error(ungerr.Wrap(err, "validation"))
+			return
+		}
+		resp, err := groupSvc.Create(c.Request.Context(), getTestProfileID(c), req)
+		if err != nil {
+			_ = c.Error(err)
+			return
+		}
+		c.JSON(http.StatusCreated, gin.H{"data": resp})
+	})
+	api.GET("/groups", func(c *gin.Context) {
+		resp, err := groupSvc.List(c.Request.Context(), getTestProfileID(c))
+		if err != nil {
+			_ = c.Error(err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"data": resp})
+	})
+	api.GET("/groups/:groupID", func(c *gin.Context) {
+		groupID, err := uuid.Parse(c.Param("groupID"))
+		if err != nil {
+			_ = c.Error(ungerr.BadRequestError("invalid groupID"))
+			return
+		}
+		resp, err := groupSvc.Get(c.Request.Context(), getTestProfileID(c), groupID)
+		if err != nil {
+			_ = c.Error(err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"data": resp})
+	})
+	api.POST("/groups/join/:token", func(c *gin.Context) {
+		resp, err := groupSvc.Join(c.Request.Context(), getTestProfileID(c), c.Param("token"))
+		if err != nil {
+			_ = c.Error(err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"data": resp})
+	})
+	api.GET("/groups/:groupID/watchlist", func(c *gin.Context) {
+		groupID, err := uuid.Parse(c.Param("groupID"))
+		if err != nil {
+			_ = c.Error(ungerr.BadRequestError("invalid groupID"))
+			return
+		}
+		resp, err := groupSvc.GetMergedWatchlist(c.Request.Context(), getTestProfileID(c), groupID, c.Query("filter"))
+		if err != nil {
+			_ = c.Error(err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"data": resp})
 	})
 }
 
