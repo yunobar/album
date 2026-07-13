@@ -59,9 +59,17 @@ func setupTestRouter(db *gorm.DB) *gin.Engine {
 	return r
 }
 
+// testProfileIDHeader lets a test request as a different profile than the
+// default testProfileID, to exercise profile-scoping behavior end-to-end.
+const testProfileIDHeader = "X-Test-Profile-ID"
+
 func fakeAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Set(appconstant.ContextProfileID.String(), testProfileID.String())
+		profileID := testProfileID.String()
+		if override := c.GetHeader(testProfileIDHeader); override != "" {
+			profileID = override
+		}
+		c.Set(appconstant.ContextProfileID.String(), profileID)
 		c.Set("userID", testUserID.String())
 		c.Set("sessionID", "test-session")
 		c.Next()
@@ -77,6 +85,7 @@ func registerTestRoutes(r *gin.Engine, db *gorm.DB) {
 
 	// Services
 	profileSvc := service.NewProfileService(transactor, profileRepo, userRepo)
+	watchlistSvc := service.NewWatchlistService(transactor, crud.NewRepository[entity.WatchlistItem](db), crud.NewRepository[entity.Content](db))
 
 	// Routes
 	api := r.Group("/api/v1")
@@ -118,6 +127,54 @@ func registerTestRoutes(r *gin.Engine, db *gorm.DB) {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"data": resp})
+	})
+
+	// Watchlist
+	api.GET("/watchlist", thinHandler(func(c *gin.Context) (any, error) {
+		return watchlistSvc.List(c.Request.Context(), getTestProfileID(c))
+	}))
+	api.POST("/watchlist", func(c *gin.Context) {
+		var req dto.AddWatchlistItemRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			_ = c.Error(ungerr.Wrap(err, "validation"))
+			return
+		}
+		resp, err := watchlistSvc.Add(c.Request.Context(), getTestProfileID(c), req)
+		if err != nil {
+			_ = c.Error(err)
+			return
+		}
+		c.JSON(http.StatusCreated, gin.H{"data": resp})
+	})
+	api.PATCH("/watchlist/:contentId", func(c *gin.Context) {
+		contentID, err := uuid.Parse(c.Param("contentId"))
+		if err != nil {
+			_ = c.Error(ungerr.BadRequestError("invalid contentId"))
+			return
+		}
+		var req dto.UpdateWatchlistItemRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			_ = c.Error(ungerr.Wrap(err, "validation"))
+			return
+		}
+		resp, err := watchlistSvc.Update(c.Request.Context(), getTestProfileID(c), contentID, req)
+		if err != nil {
+			_ = c.Error(err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"data": resp})
+	})
+	api.DELETE("/watchlist/:contentId", func(c *gin.Context) {
+		contentID, err := uuid.Parse(c.Param("contentId"))
+		if err != nil {
+			_ = c.Error(ungerr.BadRequestError("invalid contentId"))
+			return
+		}
+		if err := watchlistSvc.Remove(c.Request.Context(), getTestProfileID(c), contentID); err != nil {
+			_ = c.Error(err)
+			return
+		}
+		c.Status(http.StatusNoContent)
 	})
 }
 

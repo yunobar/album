@@ -5,6 +5,7 @@ import (
 	"github.com/kroma-labs/sentinel-go/httpserver"
 	sentinelGin "github.com/kroma-labs/sentinel-go/httpserver/adapters/gin"
 	"github.com/yunobar/album/internal/adapters/http/handler"
+	"github.com/yunobar/album/internal/appconstant"
 	"golang.org/x/time/rate"
 )
 
@@ -62,6 +63,14 @@ func RegisterAPIRoutes(router *gin.Engine, handlers *handler.Handlers, authMiddl
 				}))
 				{
 					contentRoutes.GET("/search", handlers.Content.HandleSearch())
+				}
+
+				watchlistRoutes := protectedRoutes.Group("/watchlist")
+				{
+					watchlistRoutes.GET("", handlers.Watchlist.HandleList())
+					watchlistRoutes.POST("", handlers.Watchlist.HandleAdd())
+					watchlistRoutes.PATCH("/:"+appconstant.ContextContentID.String(), handlers.Watchlist.HandleUpdate())
+					watchlistRoutes.DELETE("/:"+appconstant.ContextContentID.String(), handlers.Watchlist.HandleRemove())
 				}
 			}
 		}
