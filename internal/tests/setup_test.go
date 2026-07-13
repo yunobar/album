@@ -221,6 +221,19 @@ func registerTestRoutes(r *gin.Engine, db *gorm.DB) {
 		}
 		c.JSON(http.StatusOK, gin.H{"data": resp})
 	})
+	api.GET("/groups/:groupID/watchlist", func(c *gin.Context) {
+		groupID, err := uuid.Parse(c.Param("groupID"))
+		if err != nil {
+			_ = c.Error(ungerr.BadRequestError("invalid groupID"))
+			return
+		}
+		resp, err := groupSvc.GetMergedWatchlist(c.Request.Context(), getTestProfileID(c), groupID, c.Query("filter"))
+		if err != nil {
+			_ = c.Error(err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"data": resp})
+	})
 }
 
 func getTestProfileID(c *gin.Context) uuid.UUID {

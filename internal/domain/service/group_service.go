@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/itsLeonB/go-crud"
 	"github.com/itsLeonB/ungerr"
+	"github.com/yunobar/album/internal/appconstant"
 	"github.com/yunobar/album/internal/core/otel"
 	"github.com/yunobar/album/internal/domain/dto"
 	"github.com/yunobar/album/internal/domain/entity"
@@ -19,6 +20,7 @@ type GroupService interface {
 	List(ctx context.Context, profileID uuid.UUID) (dto.ListGroupsResponse, error)
 	Get(ctx context.Context, profileID, groupID uuid.UUID) (dto.GroupResponse, error)
 	Join(ctx context.Context, profileID uuid.UUID, token string) (dto.GroupResponse, error)
+	GetMergedWatchlist(ctx context.Context, profileID, groupID uuid.UUID, filter string) (dto.MergedWatchlistResponse, error)
 }
 
 type groupServiceImpl struct {
@@ -205,4 +207,110 @@ func (gs *groupServiceImpl) membersOf(ctx context.Context, groupID uuid.UUID) ([
 	})
 
 	return members, nil
+}
+
+// mergedWatchlistRow is one (member, active watchlist item, content) row —
+// deliberately unaggregated: array_agg/jsonb_object_agg would need a
+// Postgres-specific scan type with no precedent in this codebase, whereas
+// grouping in Go after a plain JOIN is a few lines of stdlib.
+type mergedWatchlistRow struct {
+	ContentID   uuid.UUID
+	ProfileID   uuid.UUID
+	Priority    string
+	ContentType string
+	Title       string
+	ReleaseYear *int
+	PosterURL   string
+}
+
+func (gs *groupServiceImpl) GetMergedWatchlist(ctx context.Context, profileID, groupID uuid.UUID, filter string) (dto.MergedWatchlistResponse, error) {
+	ctx, span := otel.Tracer.Start(ctx, "GroupService.GetMergedWatchlist")
+	defer span.End()
+
+	if _, err := gs.requireMembership(ctx, groupID, profileID); err != nil {
+		return dto.MergedWatchlistResponse{}, err
+	}
+
+	if filter == "" {
+		filter = "all"
+	}
+
+	db, err := gs.groupMemberRepo.GetGormInstance(ctx)
+	if err != nil {
+		return dto.MergedWatchlistResponse{}, err
+	}
+
+	var rows []mergedWatchlistRow
+	err = db.Raw(`
+		SELECT wi.content_id  AS content_id,
+		       wi.profile_id  AS profile_id,
+		       wi.priority    AS priority,
+		       c.content_type AS content_type,
+		       c.title        AS title,
+		       c.release_year AS release_year,
+		       c.poster_url   AS poster_url
+		FROM group_members gm
+		JOIN watchlist_items wi ON wi.profile_id = gm.profile_id AND wi.status = ?
+		JOIN content c ON c.id = wi.content_id
+		WHERE gm.group_id = ?
+		  AND (? = 'all' OR c.content_type = ?)
+	`, appconstant.WatchlistStatusActive, groupID, filter, filter).Scan(&rows).Error
+	if err != nil {
+		return dto.MergedWatchlistResponse{}, ungerr.Wrap(err, "error querying merged watchlist")
+	}
+
+	return dto.MergedWatchlistResponse{Filter: filter, Items: mergeRows(rows)}, nil
+}
+
+// mergeRows groups per-member rows by content_id (the dedup anchor — see
+// ADR-0002) and orders the result by interested_count desc, then title.
+func mergeRows(rows []mergedWatchlistRow) []dto.MergedItemResponse {
+	type accumulator struct {
+		content    dto.MergedContentResponse
+		members    []uuid.UUID
+		priorities map[string]string
+	}
+
+	order := make([]uuid.UUID, 0, len(rows))
+	byContent := make(map[uuid.UUID]*accumulator, len(rows))
+
+	for _, row := range rows {
+		acc, ok := byContent[row.ContentID]
+		if !ok {
+			acc = &accumulator{
+				content: dto.MergedContentResponse{
+					ID:          row.ContentID,
+					ContentType: row.ContentType,
+					Title:       row.Title,
+					ReleaseYear: row.ReleaseYear,
+					PosterUrl:   row.PosterURL,
+				},
+				priorities: make(map[string]string),
+			}
+			byContent[row.ContentID] = acc
+			order = append(order, row.ContentID)
+		}
+		acc.members = append(acc.members, row.ProfileID)
+		acc.priorities[row.ProfileID.String()] = row.Priority
+	}
+
+	items := make([]dto.MergedItemResponse, 0, len(order))
+	for _, id := range order {
+		acc := byContent[id]
+		items = append(items, dto.MergedItemResponse{
+			Content:         acc.content,
+			InterestedCount: len(acc.members),
+			Members:         acc.members,
+			Priorities:      acc.priorities,
+		})
+	}
+
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].InterestedCount != items[j].InterestedCount {
+			return items[i].InterestedCount > items[j].InterestedCount
+		}
+		return items[i].Content.Title < items[j].Content.Title
+	})
+
+	return items
 }

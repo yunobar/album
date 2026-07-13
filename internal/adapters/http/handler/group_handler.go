@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin/binding"
 	"github.com/google/uuid"
 	_ "github.com/itsLeonB/ginkgo/pkg/response"
 	"github.com/itsLeonB/ginkgo/pkg/server"
@@ -111,5 +112,36 @@ func (gh *GroupHandler) HandleJoin() gin.HandlerFunc {
 		}
 
 		return gh.groupService.Join(ctx.Request.Context(), profileID, token)
+	})
+}
+
+// HandleMergedWatchlist godoc
+// @Summary      Get the group's merged watchlist
+// @Tags         groups
+// @Security     BearerAuth
+// @Produce      json
+// @Param        groupID path string true "Group ID"
+// @Param        filter query string false "all, movie, or tv (default all)"
+// @Success      200  {object}  response.JSONResponse[dto.MergedWatchlistResponse]
+// @Failure      404  {object}  map[string]any
+// @Router       /groups/{groupID}/watchlist [get]
+func (gh *GroupHandler) HandleMergedWatchlist() gin.HandlerFunc {
+	return server.Handler("GroupHandler.HandleMergedWatchlist", http.StatusOK, func(ctx *gin.Context) (any, error) {
+		profileID, err := getProfileID(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		groupID, err := server.GetRequiredPathParam[uuid.UUID](ctx, appconstant.ContextGroupID.String())
+		if err != nil {
+			return nil, err
+		}
+
+		request, err := server.BindRequest[dto.MergedWatchlistRequest](ctx, binding.Query)
+		if err != nil {
+			return nil, err
+		}
+
+		return gh.groupService.GetMergedWatchlist(ctx.Request.Context(), profileID, groupID, request.Filter)
 	})
 }

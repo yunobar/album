@@ -187,6 +187,91 @@ func TestGroupJoin(t *testing.T) {
 	})
 }
 
+func TestGroupMergedWatchlist(t *testing.T) {
+	testhelpers.RequireTestDB(t, testDB)
+
+	t.Run("two members adding the same title dedups to one row with interested_count 2 and both priorities", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		bob := seedTestProfile(t, "Bob")
+		group := seedTestGroup(t, nil, testProfileID, bob.ID)
+		content := seedTestContent(t)
+
+		require.NoError(t, testDB.Create(&entity.WatchlistItem{
+			ProfileID: testProfileID,
+			ContentID: content.ID,
+			Priority:  "high",
+			Status:    "active",
+		}).Error)
+		require.NoError(t, testDB.Create(&entity.WatchlistItem{
+			ProfileID: bob.ID,
+			ContentID: content.ID,
+			Priority:  "must",
+			Status:    "active",
+		}).Error)
+
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodGet, "/api/v1/groups/"+group.ID.String()+"/watchlist", nil)
+		testRouter.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var resp struct {
+			Data dto.MergedWatchlistResponse `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		require.Len(t, resp.Data.Items, 1, "the same content_id from two members must dedup to one row")
+		item := resp.Data.Items[0]
+		assert.Equal(t, content.ID, item.Content.ID)
+		assert.Equal(t, 2, item.InterestedCount)
+		assert.ElementsMatch(t, []uuid.UUID{testProfileID, bob.ID}, item.Members)
+		assert.Equal(t, "high", item.Priorities[testProfileID.String()])
+		assert.Equal(t, "must", item.Priorities[bob.ID.String()])
+	})
+
+	t.Run("filter=movie|tv narrows results; watched items and non-member interest are excluded", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		bob := seedTestProfile(t, "Bob")
+		outsider := seedTestProfile(t, "Outsider")
+		group := seedTestGroup(t, nil, testProfileID, bob.ID)
+
+		movie := seedTestContent(t)
+		tv := entity.Content{Source: "tmdb", SourceID: uuid.NewString(), ContentType: "tv", Title: "Test Show", Metadata: json.RawMessage(`{}`)}
+		require.NoError(t, testDB.Create(&tv).Error)
+		watchedMovie := seedTestContent(t)
+
+		require.NoError(t, testDB.Create(&entity.WatchlistItem{ProfileID: testProfileID, ContentID: movie.ID, Priority: "low", Status: "active"}).Error)
+		require.NoError(t, testDB.Create(&entity.WatchlistItem{ProfileID: bob.ID, ContentID: tv.ID, Priority: "low", Status: "active"}).Error)
+		require.NoError(t, testDB.Create(&entity.WatchlistItem{ProfileID: testProfileID, ContentID: watchedMovie.ID, Priority: "low", Status: "watched"}).Error)
+		require.NoError(t, testDB.Create(&entity.WatchlistItem{ProfileID: outsider.ID, ContentID: movie.ID, Priority: "must", Status: "active"}).Error)
+
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodGet, "/api/v1/groups/"+group.ID.String()+"/watchlist?filter=movie", nil)
+		testRouter.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var resp struct {
+			Data dto.MergedWatchlistResponse `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		require.Len(t, resp.Data.Items, 1)
+		assert.Equal(t, movie.ID, resp.Data.Items[0].Content.ID)
+		assert.Equal(t, 1, resp.Data.Items[0].InterestedCount, "a non-member's watchlist entry must not count")
+	})
+
+	t.Run("404s for a non-member", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		other := seedTestProfile(t, "Other")
+		group := seedTestGroup(t, nil, other.ID)
+
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodGet, "/api/v1/groups/"+group.ID.String()+"/watchlist", nil)
+		testRouter.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+}
+
 // seedTestGroup creates a group (nil name derives; pass a pointer for a fixed
 // name) and joins each of memberIDs to it in group_members.
 func seedTestGroup(t *testing.T, name *string, memberIDs ...uuid.UUID) entity.Group {
