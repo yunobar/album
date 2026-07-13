@@ -213,6 +213,14 @@ func registerTestRoutes(r *gin.Engine, db *gorm.DB) {
 		}
 		c.JSON(http.StatusOK, gin.H{"data": resp})
 	})
+	api.POST("/groups/join/:token", func(c *gin.Context) {
+		resp, err := groupSvc.Join(c.Request.Context(), getTestProfileID(c), c.Param("token"))
+		if err != nil {
+			_ = c.Error(err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"data": resp})
+	})
 }
 
 func getTestProfileID(c *gin.Context) uuid.UUID {

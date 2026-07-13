@@ -88,3 +88,28 @@ func (gh *GroupHandler) HandleGet() gin.HandlerFunc {
 		return gh.groupService.Get(ctx.Request.Context(), profileID, groupID)
 	})
 }
+
+// HandleJoin godoc
+// @Summary      Join a group by invite token
+// @Tags         groups
+// @Security     BearerAuth
+// @Produce      json
+// @Param        token path string true "Invite token"
+// @Success      200  {object}  response.JSONResponse[dto.GroupResponse]
+// @Failure      404  {object}  map[string]any
+// @Router       /groups/join/{token} [post]
+func (gh *GroupHandler) HandleJoin() gin.HandlerFunc {
+	return server.Handler("GroupHandler.HandleJoin", http.StatusOK, func(ctx *gin.Context) (any, error) {
+		profileID, err := getProfileID(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		token, err := server.GetRequiredPathParam[string](ctx, appconstant.ContextToken.String())
+		if err != nil {
+			return nil, err
+		}
+
+		return gh.groupService.Join(ctx.Request.Context(), profileID, token)
+	})
+}

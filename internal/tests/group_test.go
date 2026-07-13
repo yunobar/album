@@ -136,6 +136,57 @@ func TestGroupList(t *testing.T) {
 	})
 }
 
+func TestGroupJoin(t *testing.T) {
+	testhelpers.RequireTestDB(t, testDB)
+
+	t.Run("joins the group addressed by the token", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		owner := seedTestProfile(t, "Owner")
+		group := seedTestGroup(t, nil, owner.ID)
+
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodPost, "/api/v1/groups/join/"+group.InviteToken, nil)
+		testRouter.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var resp struct {
+			Data dto.GroupResponse `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.Len(t, resp.Data.Members, 2)
+
+		var members []entity.GroupMember
+		require.NoError(t, testDB.Where("group_id = ?", group.ID).Find(&members).Error)
+		assert.Len(t, members, 2)
+	})
+
+	t.Run("joining twice is idempotent — 200, not 409, and no duplicate row", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		group := seedTestGroup(t, nil, testProfileID)
+
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodPost, "/api/v1/groups/join/"+group.InviteToken, nil)
+		testRouter.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+
+		var members []entity.GroupMember
+		require.NoError(t, testDB.Where("group_id = ?", group.ID).Find(&members).Error)
+		require.Len(t, members, 1, "already-a-member join must not insert a duplicate row")
+	})
+
+	t.Run("404s for an unknown token", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodPost, "/api/v1/groups/join/"+uuid.New().String(), nil)
+		testRouter.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+}
+
 // seedTestGroup creates a group (nil name derives; pass a pointer for a fixed
 // name) and joins each of memberIDs to it in group_members.
 func seedTestGroup(t *testing.T, name *string, memberIDs ...uuid.UUID) entity.Group {

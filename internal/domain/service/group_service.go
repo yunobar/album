@@ -18,6 +18,7 @@ type GroupService interface {
 	Create(ctx context.Context, profileID uuid.UUID, request dto.CreateGroupRequest) (dto.GroupResponse, error)
 	List(ctx context.Context, profileID uuid.UUID) (dto.ListGroupsResponse, error)
 	Get(ctx context.Context, profileID, groupID uuid.UUID) (dto.GroupResponse, error)
+	Join(ctx context.Context, profileID uuid.UUID, token string) (dto.GroupResponse, error)
 }
 
 type groupServiceImpl struct {
@@ -98,6 +99,51 @@ func (gs *groupServiceImpl) Create(ctx context.Context, profileID uuid.UUID, req
 		member.Profile = profile
 
 		response = mapper.GroupToResponse(group, []entity.GroupMember{member}, profileID)
+		return nil
+	})
+
+	return response, err
+}
+
+func (gs *groupServiceImpl) Join(ctx context.Context, profileID uuid.UUID, token string) (dto.GroupResponse, error) {
+	ctx, span := otel.Tracer.Start(ctx, "GroupService.Join")
+	defer span.End()
+
+	var response dto.GroupResponse
+
+	err := gs.transactor.WithinTransaction(ctx, func(ctx context.Context) error {
+		groupSpec := crud.Specification[entity.Group]{}
+		groupSpec.Model.InviteToken = token
+		group, err := gs.groupRepo.FindFirst(ctx, groupSpec)
+		if err != nil {
+			return err
+		}
+		if group.IsZero() {
+			return ungerr.NotFoundError("group for this invite token is not found")
+		}
+
+		memberSpec := crud.Specification[entity.GroupMember]{}
+		memberSpec.Model.GroupID = group.ID
+		memberSpec.Model.ProfileID = profileID
+		existing, err := gs.groupMemberRepo.FindFirst(ctx, memberSpec)
+		if err != nil {
+			return err
+		}
+		if existing.IsZero() {
+			if _, err := gs.groupMemberRepo.Insert(ctx, entity.GroupMember{
+				GroupID:   group.ID,
+				ProfileID: profileID,
+			}); err != nil {
+				return err
+			}
+		}
+
+		members, err := gs.membersOf(ctx, group.ID)
+		if err != nil {
+			return err
+		}
+
+		response = mapper.GroupToResponse(group, members, profileID)
 		return nil
 	})
 
