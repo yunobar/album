@@ -69,6 +69,50 @@ func TestWatchlistAdd(t *testing.T) {
 		testRouter.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusNotFound, w.Code)
 	})
+
+	t.Run("404 when deleting a content_id not on the watchlist", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodDelete, "/api/v1/watchlist/"+uuid.New().String(), nil)
+		testRouter.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+
+	t.Run("another profile's update/delete against the same content_id 404s and leaves the row untouched", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		content := seedTestContent(t)
+
+		require.NoError(t, testDB.Create(&entity.WatchlistItem{
+			ProfileID: testProfileID,
+			ContentID: content.ID,
+			Priority:  "low",
+			Notes:     "owner's notes",
+			Status:    "active",
+		}).Error)
+
+		otherProfileID := uuid.New()
+
+		updateReq, _ := http.NewRequest(http.MethodPatch, "/api/v1/watchlist/"+content.ID.String(), strings.NewReader(`{"priority":"must"}`))
+		updateReq.Header.Set("Content-Type", "application/json")
+		updateReq.Header.Set(testProfileIDHeader, otherProfileID.String())
+		w := httptest.NewRecorder()
+		testRouter.ServeHTTP(w, updateReq)
+		assert.Equal(t, http.StatusNotFound, w.Code, "update must be scoped by profile_id, not just content_id")
+
+		deleteReq, _ := http.NewRequest(http.MethodDelete, "/api/v1/watchlist/"+content.ID.String(), nil)
+		deleteReq.Header.Set(testProfileIDHeader, otherProfileID.String())
+		w2 := httptest.NewRecorder()
+		testRouter.ServeHTTP(w2, deleteReq)
+		assert.Equal(t, http.StatusNotFound, w2.Code, "delete must be scoped by profile_id, not just content_id")
+
+		var persisted entity.WatchlistItem
+		require.NoError(t, testDB.First(&persisted, "content_id = ?", content.ID).Error)
+		assert.Equal(t, "low", persisted.Priority)
+		assert.Equal(t, "owner's notes", persisted.Notes)
+	})
 }
 
 func TestWatchlistList(t *testing.T) {
@@ -154,6 +198,70 @@ func TestWatchlistUpdate(t *testing.T) {
 		req.Header.Set("Content-Type", "application/json")
 		testRouter.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+
+	t.Run("priority-only update leaves notes untouched", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		content := seedTestContent(t)
+
+		require.NoError(t, testDB.Create(&entity.WatchlistItem{
+			ProfileID: testProfileID,
+			ContentID: content.ID,
+			Priority:  "low",
+			Notes:     "original notes",
+			Status:    "active",
+		}).Error)
+
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodPatch, "/api/v1/watchlist/"+content.ID.String(), strings.NewReader(`{"priority":"must"}`))
+		req.Header.Set("Content-Type", "application/json")
+		testRouter.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var resp struct {
+			Data dto.WatchlistItemResponse `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.Equal(t, "must", resp.Data.Priority)
+		assert.Equal(t, "original notes", resp.Data.Notes)
+
+		var persisted entity.WatchlistItem
+		require.NoError(t, testDB.First(&persisted, "content_id = ?", content.ID).Error)
+		assert.Equal(t, "must", persisted.Priority)
+		assert.Equal(t, "original notes", persisted.Notes)
+	})
+
+	t.Run("notes-only update leaves priority untouched", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		content := seedTestContent(t)
+
+		require.NoError(t, testDB.Create(&entity.WatchlistItem{
+			ProfileID: testProfileID,
+			ContentID: content.ID,
+			Priority:  "low",
+			Notes:     "original notes",
+			Status:    "active",
+		}).Error)
+
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodPatch, "/api/v1/watchlist/"+content.ID.String(), strings.NewReader(`{"notes":"updated notes"}`))
+		req.Header.Set("Content-Type", "application/json")
+		testRouter.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var resp struct {
+			Data dto.WatchlistItemResponse `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.Equal(t, "low", resp.Data.Priority)
+		assert.Equal(t, "updated notes", resp.Data.Notes)
+
+		var persisted entity.WatchlistItem
+		require.NoError(t, testDB.First(&persisted, "content_id = ?", content.ID).Error)
+		assert.Equal(t, "low", persisted.Priority)
+		assert.Equal(t, "updated notes", persisted.Notes)
 	})
 }
 

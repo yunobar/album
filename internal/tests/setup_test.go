@@ -59,9 +59,17 @@ func setupTestRouter(db *gorm.DB) *gin.Engine {
 	return r
 }
 
+// testProfileIDHeader lets a test request as a different profile than the
+// default testProfileID, to exercise profile-scoping behavior end-to-end.
+const testProfileIDHeader = "X-Test-Profile-ID"
+
 func fakeAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Set(appconstant.ContextProfileID.String(), testProfileID.String())
+		profileID := testProfileID.String()
+		if override := c.GetHeader(testProfileIDHeader); override != "" {
+			profileID = override
+		}
+		c.Set(appconstant.ContextProfileID.String(), profileID)
 		c.Set("userID", testUserID.String())
 		c.Set("sessionID", "test-session")
 		c.Next()

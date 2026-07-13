@@ -13,6 +13,7 @@ CREATE TABLE watchlist_items (
 );
 
 CREATE INDEX idx_watchlist_items_profile_id ON watchlist_items(profile_id);
+CREATE INDEX idx_watchlist_items_content_id ON watchlist_items(content_id);
 -- +goose StatementEnd
 
 -- +goose Down
