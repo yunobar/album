@@ -46,6 +46,24 @@ func (gh *GroupHandler) HandleCreate() gin.HandlerFunc {
 	})
 }
 
+// HandleList godoc
+// @Summary      List the caller's groups
+// @Tags         groups
+// @Security     BearerAuth
+// @Produce      json
+// @Success      200  {object}  response.JSONResponse[dto.ListGroupsResponse]
+// @Router       /groups [get]
+func (gh *GroupHandler) HandleList() gin.HandlerFunc {
+	return server.Handler("GroupHandler.HandleList", http.StatusOK, func(ctx *gin.Context) (any, error) {
+		profileID, err := getProfileID(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		return gh.groupService.List(ctx.Request.Context(), profileID)
+	})
+}
+
 // HandleGet godoc
 // @Summary      Get a group's detail
 // @Tags         groups

@@ -76,6 +76,7 @@ func RegisterAPIRoutes(router *gin.Engine, handlers *handler.Handlers, authMiddl
 				groupRoutes := protectedRoutes.Group("/groups")
 				{
 					groupRoutes.POST("", handlers.Group.HandleCreate())
+					groupRoutes.GET("", handlers.Group.HandleList())
 					groupRoutes.GET("/:"+appconstant.ContextGroupID.String(), handlers.Group.HandleGet())
 				}
 			}

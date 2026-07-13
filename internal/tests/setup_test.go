@@ -192,6 +192,14 @@ func registerTestRoutes(r *gin.Engine, db *gorm.DB) {
 		}
 		c.JSON(http.StatusCreated, gin.H{"data": resp})
 	})
+	api.GET("/groups", func(c *gin.Context) {
+		resp, err := groupSvc.List(c.Request.Context(), getTestProfileID(c))
+		if err != nil {
+			_ = c.Error(err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"data": resp})
+	})
 	api.GET("/groups/:groupID", func(c *gin.Context) {
 		groupID, err := uuid.Parse(c.Param("groupID"))
 		if err != nil {

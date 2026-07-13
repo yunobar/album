@@ -107,6 +107,35 @@ func TestGroupGet(t *testing.T) {
 	})
 }
 
+func TestGroupList(t *testing.T) {
+	testhelpers.RequireTestDB(t, testDB)
+
+	t.Run("lists the caller's groups with a per-viewer derived name and member count", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		bob := seedTestProfile(t, "Bob")
+		carol := seedTestProfile(t, "Carol")
+		other := seedTestProfile(t, "Not In This Group")
+
+		g1 := seedTestGroup(t, nil, testProfileID, bob.ID, carol.ID)
+		seedTestGroup(t, nil, other.ID)
+
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodGet, "/api/v1/groups", nil)
+		testRouter.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var resp struct {
+			Data dto.ListGroupsResponse `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		require.Len(t, resp.Data.Groups, 1, "must not include a group the caller isn't a member of")
+		assert.Equal(t, g1.ID, resp.Data.Groups[0].ID)
+		assert.Equal(t, "Bob & Carol", resp.Data.Groups[0].Name)
+		assert.Equal(t, 3, resp.Data.Groups[0].MemberCount)
+	})
+}
+
 // seedTestGroup creates a group (nil name derives; pass a pointer for a fixed
 // name) and joins each of memberIDs to it in group_members.
 func seedTestGroup(t *testing.T, name *string, memberIDs ...uuid.UUID) entity.Group {

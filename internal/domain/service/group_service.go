@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/google/uuid"
 	"github.com/itsLeonB/go-crud"
@@ -15,6 +16,7 @@ import (
 
 type GroupService interface {
 	Create(ctx context.Context, profileID uuid.UUID, request dto.CreateGroupRequest) (dto.GroupResponse, error)
+	List(ctx context.Context, profileID uuid.UUID) (dto.ListGroupsResponse, error)
 	Get(ctx context.Context, profileID, groupID uuid.UUID) (dto.GroupResponse, error)
 }
 
@@ -32,6 +34,33 @@ func NewGroupService(
 	profileRepo crud.Repository[entity.UserProfile],
 ) GroupService {
 	return &groupServiceImpl{transactor, groupRepo, groupMemberRepo, profileRepo}
+}
+
+func (gs *groupServiceImpl) List(ctx context.Context, profileID uuid.UUID) (dto.ListGroupsResponse, error) {
+	ctx, span := otel.Tracer.Start(ctx, "GroupService.List")
+	defer span.End()
+
+	spec := crud.Specification[entity.GroupMember]{PreloadRelations: []string{"Group"}}
+	spec.Model.ProfileID = profileID
+	memberships, err := gs.groupMemberRepo.FindAll(ctx, spec)
+	if err != nil {
+		return dto.ListGroupsResponse{}, err
+	}
+
+	// ponytail: one membersOf query per group (N+1) — fine at MVP group
+	// counts per user (ADR-0002's "MVP group sizes" reasoning applies here
+	// too); replace with a single grouped query if this shows up as a
+	// measured hot path.
+	summaries := make([]dto.GroupSummaryResponse, 0, len(memberships))
+	for _, membership := range memberships {
+		members, err := gs.membersOf(ctx, membership.GroupID)
+		if err != nil {
+			return dto.ListGroupsResponse{}, err
+		}
+		summaries = append(summaries, mapper.GroupToSummary(membership.Group, members, profileID))
+	}
+
+	return dto.ListGroupsResponse{Groups: summaries}, nil
 }
 
 func (gs *groupServiceImpl) Create(ctx context.Context, profileID uuid.UUID, request dto.CreateGroupRequest) (dto.GroupResponse, error) {
@@ -111,9 +140,23 @@ func (gs *groupServiceImpl) requireMembership(ctx context.Context, groupID, prof
 	return membership, nil
 }
 
+// membersOf returns the group's members in join order (oldest CreatedAt
+// first) — go-crud's FindAll unconditionally orders "created_at DESC", which
+// is the wrong direction for join order, so it's reversed here. Join order
+// is what name derivation concatenates by, and what the spec defines Round
+// Robin ordering on (see group-merge-backend.md).
 func (gs *groupServiceImpl) membersOf(ctx context.Context, groupID uuid.UUID) ([]entity.GroupMember, error) {
 	spec := crud.Specification[entity.GroupMember]{PreloadRelations: []string{"Profile"}}
 	spec.Model.GroupID = groupID
 
-	return gs.groupMemberRepo.FindAll(ctx, spec)
+	members, err := gs.groupMemberRepo.FindAll(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
+
+	sort.Slice(members, func(i, j int) bool {
+		return members[i].CreatedAt.Before(members[j].CreatedAt)
+	})
+
+	return members, nil
 }
