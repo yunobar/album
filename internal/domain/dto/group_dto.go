@@ -33,19 +33,11 @@ type MergedWatchlistRequest struct {
 	Filter string `form:"filter" binding:"omitempty,oneof=all movie tv"`
 }
 
-type MergedContentResponse struct {
-	ID          uuid.UUID `json:"id"`
-	ContentType string    `json:"contentType"`
-	Title       string    `json:"title"`
-	ReleaseYear *int      `json:"releaseYear,omitempty"`
-	PosterUrl   string    `json:"posterUrl,omitempty"`
-}
-
 type MergedItemResponse struct {
-	Content         MergedContentResponse `json:"content"`
-	InterestedCount int                   `json:"interestedCount"`
-	Members         []uuid.UUID           `json:"members"`
-	Priorities      map[string]string     `json:"priorities"`
+	Content         ContentResponse   `json:"content"`
+	InterestedCount int               `json:"interestedCount"`
+	Members         []uuid.UUID       `json:"members"`
+	Priorities      map[string]string `json:"priorities"`
 }
 
 type MergedWatchlistResponse struct {

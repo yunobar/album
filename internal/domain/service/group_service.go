@@ -282,7 +282,7 @@ func (gs *groupServiceImpl) GetMergedWatchlist(ctx context.Context, profileID, g
 // ADR-0002) and orders the result by interested_count desc, then title.
 func mergeRows(rows []mergedWatchlistRow) []dto.MergedItemResponse {
 	type accumulator struct {
-		content    dto.MergedContentResponse
+		content    dto.ContentResponse
 		members    []uuid.UUID
 		priorities map[string]string
 	}
@@ -294,8 +294,10 @@ func mergeRows(rows []mergedWatchlistRow) []dto.MergedItemResponse {
 		acc, ok := byContent[row.ContentID]
 		if !ok {
 			acc = &accumulator{
-				content: dto.MergedContentResponse{
-					ID:          row.ContentID,
+				content: dto.ContentResponse{
+					BaseDTO: dto.BaseDTO{
+						ID: row.ContentID,
+					},
 					ContentType: row.ContentType,
 					Title:       row.Title,
 					ReleaseYear: row.ReleaseYear,
