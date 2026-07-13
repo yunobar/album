@@ -13,6 +13,7 @@ import (
 	"github.com/yunobar/album/internal/domain/dto"
 	"github.com/yunobar/album/internal/domain/entity"
 	"github.com/yunobar/album/internal/domain/mapper"
+	"gorm.io/gorm/clause"
 )
 
 type GroupService interface {
@@ -132,11 +133,23 @@ func (gs *groupServiceImpl) Join(ctx context.Context, profileID uuid.UUID, token
 			return err
 		}
 		if existing.IsZero() {
-			if _, err := gs.groupMemberRepo.Insert(ctx, entity.GroupMember{
+			db, err := gs.groupMemberRepo.GetGormInstance(ctx)
+			if err != nil {
+				return err
+			}
+
+			// ON CONFLICT DO NOTHING makes this atomic against a concurrent
+			// join for the same (group_id, profile_id): two requests can
+			// both see "not yet a member" under READ COMMITTED between the
+			// FindFirst above and this insert, but the DB's own unique
+			// index resolves the race — the loser silently no-ops instead
+			// of erroring, which is exactly what Join's idempotency
+			// promises.
+			if err := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&entity.GroupMember{
 				GroupID:   group.ID,
 				ProfileID: profileID,
-			}); err != nil {
-				return err
+			}).Error; err != nil {
+				return ungerr.Wrap(err, "error inserting group member")
 			}
 		}
 
@@ -188,11 +201,14 @@ func (gs *groupServiceImpl) requireMembership(ctx context.Context, groupID, prof
 	return membership, nil
 }
 
-// membersOf returns the group's members in join order (oldest CreatedAt
-// first) — go-crud's FindAll unconditionally orders "created_at DESC", which
-// is the wrong direction for join order, so it's reversed here. Join order
-// is what name derivation concatenates by, and what the spec defines Round
-// Robin ordering on (see group-merge-backend.md).
+// membersOf returns the group's members in join order (oldest first) — go-
+// crud's FindAll unconditionally orders "created_at DESC", which is the
+// wrong direction for join order, so it's reversed here. Sorted by ID rather
+// than CreatedAt: IDs are uuidv7 (time-ordered, like CreatedAt) but always
+// unique, so there's no tie-break ambiguity if two members' CreatedAt values
+// ever land in the same tick. Join order is what name derivation
+// concatenates by, and what the spec defines Round Robin ordering on (see
+// group-merge-backend.md).
 func (gs *groupServiceImpl) membersOf(ctx context.Context, groupID uuid.UUID) ([]entity.GroupMember, error) {
 	spec := crud.Specification[entity.GroupMember]{PreloadRelations: []string{"Profile"}}
 	spec.Model.GroupID = groupID
@@ -203,7 +219,7 @@ func (gs *groupServiceImpl) membersOf(ctx context.Context, groupID uuid.UUID) ([
 	}
 
 	sort.Slice(members, func(i, j int) bool {
-		return members[i].CreatedAt.Before(members[j].CreatedAt)
+		return members[i].ID.String() < members[j].ID.String()
 	})
 
 	return members, nil

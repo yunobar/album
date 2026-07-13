@@ -16,7 +16,6 @@ CREATE TABLE group_members (
     profile_id uuid NOT NULL REFERENCES user_profiles(id) ON DELETE CASCADE,
     CONSTRAINT group_members_group_id_profile_id_unique UNIQUE (group_id, profile_id)
 );
-CREATE INDEX idx_group_members_group_id ON group_members(group_id);
 CREATE INDEX idx_group_members_profile_id ON group_members(profile_id);
 -- +goose StatementEnd
 

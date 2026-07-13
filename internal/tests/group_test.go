@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -185,6 +186,36 @@ func TestGroupJoin(t *testing.T) {
 		testRouter.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusNotFound, w.Code)
 	})
+
+	t.Run("concurrent joins by the same profile never error and never duplicate", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		owner := seedTestProfile(t, "Owner")
+		group := seedTestGroup(t, nil, owner.ID)
+
+		const concurrency = 5
+		var wg sync.WaitGroup
+		codes := make([]int, concurrency)
+		for i := range concurrency {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				w := httptest.NewRecorder()
+				req, _ := http.NewRequest(http.MethodPost, "/api/v1/groups/join/"+group.InviteToken, nil)
+				testRouter.ServeHTTP(w, req)
+				codes[i] = w.Code
+			}(i)
+		}
+		wg.Wait()
+
+		for _, code := range codes {
+			assert.Equal(t, http.StatusOK, code, "every concurrent join must succeed idempotently, never error on the UNIQUE constraint race")
+		}
+
+		var members []entity.GroupMember
+		require.NoError(t, testDB.Where("group_id = ?", group.ID).Find(&members).Error)
+		assert.Len(t, members, 2, "concurrent joins by the same profile must not create duplicate rows")
+	})
 }
 
 func TestGroupMergedWatchlist(t *testing.T) {
@@ -257,6 +288,18 @@ func TestGroupMergedWatchlist(t *testing.T) {
 		require.Len(t, resp.Data.Items, 1)
 		assert.Equal(t, movie.ID, resp.Data.Items[0].Content.ID)
 		assert.Equal(t, 1, resp.Data.Items[0].InterestedCount, "a non-member's watchlist entry must not count")
+
+		w2 := httptest.NewRecorder()
+		req2, _ := http.NewRequest(http.MethodGet, "/api/v1/groups/"+group.ID.String()+"/watchlist?filter=tv", nil)
+		testRouter.ServeHTTP(w2, req2)
+		require.Equal(t, http.StatusOK, w2.Code)
+
+		var resp2 struct {
+			Data dto.MergedWatchlistResponse `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(w2.Body.Bytes(), &resp2))
+		require.Len(t, resp2.Data.Items, 1)
+		assert.Equal(t, tv.ID, resp2.Data.Items[0].Content.ID)
 	})
 
 	t.Run("404s for a non-member", func(t *testing.T) {
