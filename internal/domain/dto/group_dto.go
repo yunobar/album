@@ -49,6 +49,6 @@ type MergedItemResponse struct {
 }
 
 type MergedWatchlistResponse struct {
-	Filter string                `json:"filter"`
+	Filter string               `json:"filter"`
 	Items  []MergedItemResponse `json:"items"`
 }
