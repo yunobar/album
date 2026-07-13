@@ -87,6 +87,16 @@ func registerTestRoutes(r *gin.Engine, db *gorm.DB) {
 	profileSvc := service.NewProfileService(transactor, profileRepo, userRepo)
 	watchlistSvc := service.NewWatchlistService(transactor, crud.NewRepository[entity.WatchlistItem](db), crud.NewRepository[entity.Content](db))
 	groupSvc := service.NewGroupService(transactor, crud.NewRepository[entity.Group](db), crud.NewRepository[entity.GroupMember](db), profileRepo)
+	decisionSessionSvc := service.NewDecisionSessionService(
+		transactor,
+		crud.NewRepository[entity.DecisionSession](db),
+		crud.NewRepository[entity.SessionParticipant](db),
+		crud.NewRepository[entity.SessionCandidate](db),
+		crud.NewRepository[entity.GroupMember](db),
+		crud.NewRepository[entity.Group](db),
+		crud.NewRepository[entity.WatchlistItem](db),
+		crud.NewRepository[entity.SessionPrioritySnapshot](db),
+	)
 
 	// Routes
 	api := r.Group("/api/v1")
@@ -228,6 +238,39 @@ func registerTestRoutes(r *gin.Engine, db *gorm.DB) {
 			return
 		}
 		resp, err := groupSvc.GetMergedWatchlist(c.Request.Context(), getTestProfileID(c), groupID, c.Query("filter"))
+		if err != nil {
+			_ = c.Error(err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"data": resp})
+	})
+
+	// Decision Sessions
+	api.POST("/groups/:groupID/sessions", func(c *gin.Context) {
+		groupID, err := uuid.Parse(c.Param("groupID"))
+		if err != nil {
+			_ = c.Error(ungerr.BadRequestError("invalid groupID"))
+			return
+		}
+		var req dto.CreateSessionRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			_ = c.Error(ungerr.Wrap(err, "validation"))
+			return
+		}
+		resp, err := decisionSessionSvc.Create(c.Request.Context(), getTestProfileID(c), groupID, req)
+		if err != nil {
+			_ = c.Error(err)
+			return
+		}
+		c.JSON(http.StatusCreated, gin.H{"data": resp})
+	})
+	api.GET("/sessions/:sessionID", func(c *gin.Context) {
+		sessionID, err := uuid.Parse(c.Param("sessionID"))
+		if err != nil {
+			_ = c.Error(ungerr.BadRequestError("invalid sessionID"))
+			return
+		}
+		resp, err := decisionSessionSvc.Get(c.Request.Context(), getTestProfileID(c), sessionID)
 		if err != nil {
 			_ = c.Error(err)
 			return

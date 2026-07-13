@@ -8,6 +8,7 @@ const (
 	ContextContentID ctxKey = "contentID"
 	ContextGroupID   ctxKey = "groupID"
 	ContextToken     ctxKey = "token"
+	ContextSessionID ctxKey = "sessionID"
 )
 
 func (c ctxKey) String() string {

@@ -80,6 +80,12 @@ func RegisterAPIRoutes(router *gin.Engine, handlers *handler.Handlers, authMiddl
 					groupRoutes.GET("/:"+appconstant.ContextGroupID.String(), handlers.Group.HandleGet())
 					groupRoutes.POST("/join/:"+appconstant.ContextToken.String(), handlers.Group.HandleJoin())
 					groupRoutes.GET("/:"+appconstant.ContextGroupID.String()+"/watchlist", handlers.Group.HandleMergedWatchlist())
+					groupRoutes.POST("/:"+appconstant.ContextGroupID.String()+"/sessions", handlers.DecisionSession.HandleCreate())
+				}
+
+				sessionRoutes := protectedRoutes.Group("/sessions")
+				{
+					sessionRoutes.GET("/:"+appconstant.ContextSessionID.String(), handlers.DecisionSession.HandleGet())
 				}
 			}
 		}

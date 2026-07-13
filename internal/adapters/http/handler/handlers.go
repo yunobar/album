@@ -9,11 +9,12 @@ import (
 )
 
 type Handlers struct {
-	Auth      *authgin.Handler
-	Profile   *ProfileHandler
-	Content   *ContentHandler
-	Watchlist *WatchlistHandler
-	Group     *GroupHandler
+	Auth            *authgin.Handler
+	Profile         *ProfileHandler
+	Content         *ContentHandler
+	Watchlist       *WatchlistHandler
+	Group           *GroupHandler
+	DecisionSession *DecisionSessionHandler
 
 	emailLimiter *middlewares.ValueLimiter
 }
@@ -31,11 +32,12 @@ func ProvideHandlers(services *provider.Services, transport *authgin.CookieTrans
 	})
 
 	return &Handlers{
-		Auth:      authHandler,
-		Profile:   NewProfileHandler(services.Profile),
-		Content:   NewContentHandler(services.Content),
-		Watchlist: NewWatchlistHandler(services.Watchlist),
-		Group:     NewGroupHandler(services.Group),
+		Auth:            authHandler,
+		Profile:         NewProfileHandler(services.Profile),
+		Content:         NewContentHandler(services.Content),
+		Watchlist:       NewWatchlistHandler(services.Watchlist),
+		Group:           NewGroupHandler(services.Group),
+		DecisionSession: NewDecisionSessionHandler(services.DecisionSession),
 
 		emailLimiter: emailLimiter,
 	}
