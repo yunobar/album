@@ -35,8 +35,11 @@ type DecisionSessionService interface {
 	Select(ctx context.Context, profileID, sessionID uuid.UUID, request dto.CastVoteRequest) (dto.TallyResponse, error)
 	// Finalize dispatches to the session's method resolver, sets the
 	// winner/status/finalizedAt atomically, and — for round_robin — advances
-	// groups.round_robin_pointer. Idempotency is enforced by
-	// loadVotingSession's status=="voting" guard: a second call 409s.
+	// groups.round_robin_pointer. The session row is loaded with ForUpdate
+	// inside the transaction, so its status=="voting" guard also serializes
+	// concurrent Finalize calls on the same session: only the first commits,
+	// the second sees status=="completed" and 409s instead of racing to
+	// silently overwrite the winner.
 	Finalize(ctx context.Context, profileID, sessionID uuid.UUID) (dto.SessionResponse, error)
 }
 
@@ -606,72 +609,101 @@ func (dss *decisionSessionServiceImpl) Finalize(ctx context.Context, profileID, 
 	ctx, span := otel.Tracer.Start(ctx, "DecisionSessionService.Finalize")
 	defer span.End()
 
-	session, err := dss.loadVotingSession(ctx, sessionID, profileID, []string{"Participants.Profile", "Candidates.Content"})
+	// The participant-existence check has no race (a participant row's
+	// existence doesn't change during finalize), so it stays outside the
+	// transaction — mirrors loadVotingSession's own separation.
+	participantSpec := crud.Specification[entity.SessionParticipant]{}
+	participantSpec.Model.SessionID = sessionID
+	participantSpec.Model.ProfileID = profileID
+	participation, err := dss.sessionParticipantRepo.FindFirst(ctx, participantSpec)
 	if err != nil {
 		return dto.SessionResponse{}, err
 	}
-
-	candidateIDs := make([]uuid.UUID, len(session.Candidates))
-	for i, c := range session.Candidates {
-		candidateIDs[i] = c.ContentID
-	}
-
-	var winnerID uuid.UUID
-	switch session.Method {
-	case "majority":
-		voteSpec := crud.Specification[entity.SessionVote]{}
-		voteSpec.Model.SessionID = sessionID
-		votes, err := dss.sessionVoteRepo.FindAll(ctx, voteSpec)
-		if err != nil {
-			return dto.SessionResponse{}, err
-		}
-		winnerID = resolveMajority(candidateIDs, votes, session.RandomSeed)
-
-	case "ranked":
-		rankingSpec := crud.Specification[entity.SessionRanking]{}
-		rankingSpec.Model.SessionID = sessionID
-		rankings, err := dss.sessionRankingRepo.FindAll(ctx, rankingSpec)
-		if err != nil {
-			return dto.SessionResponse{}, err
-		}
-		winnerID = resolveRanked(candidateIDs, rankings, session.RandomSeed)
-
-	case "priority":
-		snapshotSpec := crud.Specification[entity.SessionPrioritySnapshot]{}
-		snapshotSpec.Model.SessionID = sessionID
-		snapshots, err := dss.sessionPrioritySnapshotRepo.FindAll(ctx, snapshotSpec)
-		if err != nil {
-			return dto.SessionResponse{}, err
-		}
-		winnerID = resolvePriority(candidateIDs, snapshots, session.RandomSeed)
-
-	case "round_robin":
-		chooser, err := dss.currentChooser(ctx, session)
-		if err != nil {
-			return dto.SessionResponse{}, err
-		}
-		var chooserVote *entity.SessionVote
-		if chooser != nil {
-			voteSpec := crud.Specification[entity.SessionVote]{}
-			voteSpec.Model.SessionID = sessionID
-			voteSpec.Model.ProfileID = *chooser
-			v, err := dss.sessionVoteRepo.FindFirst(ctx, voteSpec)
-			if err != nil {
-				return dto.SessionResponse{}, err
-			}
-			if !v.IsZero() {
-				chooserVote = &v
-			}
-		}
-		winnerID = resolveRoundRobin(candidateIDs, chooserVote, session.RandomSeed)
-
-	case "random":
-		winnerID = resolveRandom(candidateIDs, session.RandomSeed)
+	if participation.IsZero() {
+		return dto.SessionResponse{}, ungerr.NotFoundError(fmt.Sprintf("session %s is not found", sessionID))
 	}
 
 	now := time.Now()
 
 	err = dss.transactor.WithinTransaction(ctx, func(ctx context.Context) error {
+		// Session load + status check happen inside the transaction, under
+		// ForUpdate, so a concurrent Finalize on the same session blocks
+		// here instead of racing this one to compute-then-overwrite the
+		// winner (TOCTOU double-finalize).
+		sessionSpec := crud.Specification[entity.DecisionSession]{
+			ForUpdate:        true,
+			PreloadRelations: []string{"Participants.Profile", "Candidates.Content"},
+		}
+		sessionSpec.Model.ID = sessionID
+		session, err := dss.decisionSessionRepo.FindFirst(ctx, sessionSpec)
+		if err != nil {
+			return err
+		}
+		if session.ID == uuid.Nil {
+			return ungerr.NotFoundError(fmt.Sprintf("session %s is not found", sessionID))
+		}
+		if session.Status != "voting" {
+			return ungerr.ConflictError(fmt.Sprintf("session %s is not open for voting", sessionID))
+		}
+
+		candidateIDs := make([]uuid.UUID, len(session.Candidates))
+		for i, c := range session.Candidates {
+			candidateIDs[i] = c.ContentID
+		}
+
+		var winnerID uuid.UUID
+		switch session.Method {
+		case "majority":
+			voteSpec := crud.Specification[entity.SessionVote]{}
+			voteSpec.Model.SessionID = sessionID
+			votes, err := dss.sessionVoteRepo.FindAll(ctx, voteSpec)
+			if err != nil {
+				return err
+			}
+			winnerID = resolveMajority(candidateIDs, votes, session.RandomSeed)
+
+		case "ranked":
+			rankingSpec := crud.Specification[entity.SessionRanking]{}
+			rankingSpec.Model.SessionID = sessionID
+			rankings, err := dss.sessionRankingRepo.FindAll(ctx, rankingSpec)
+			if err != nil {
+				return err
+			}
+			winnerID = resolveRanked(candidateIDs, rankings, session.RandomSeed)
+
+		case "priority":
+			snapshotSpec := crud.Specification[entity.SessionPrioritySnapshot]{}
+			snapshotSpec.Model.SessionID = sessionID
+			snapshots, err := dss.sessionPrioritySnapshotRepo.FindAll(ctx, snapshotSpec)
+			if err != nil {
+				return err
+			}
+			winnerID = resolvePriority(candidateIDs, snapshots, session.RandomSeed)
+
+		case "round_robin":
+			chooser, err := dss.currentChooser(ctx, session)
+			if err != nil {
+				return err
+			}
+			var chooserVote *entity.SessionVote
+			if chooser != nil {
+				voteSpec := crud.Specification[entity.SessionVote]{}
+				voteSpec.Model.SessionID = sessionID
+				voteSpec.Model.ProfileID = *chooser
+				v, err := dss.sessionVoteRepo.FindFirst(ctx, voteSpec)
+				if err != nil {
+					return err
+				}
+				if !v.IsZero() {
+					chooserVote = &v
+				}
+			}
+			winnerID = resolveRoundRobin(candidateIDs, chooserVote, session.RandomSeed)
+
+		case "random":
+			winnerID = resolveRandom(candidateIDs, session.RandomSeed)
+		}
+
 		session.WinnerContentID = &winnerID
 		session.Status = "completed"
 		session.FinalizedAt = &now
@@ -680,7 +712,10 @@ func (dss *decisionSessionServiceImpl) Finalize(ctx context.Context, profileID, 
 		}
 
 		if session.Method == "round_robin" {
-			groupSpec := crud.Specification[entity.Group]{}
+			// ForUpdate here serializes the read-increment-write against any
+			// other concurrent Finalize touching the same group's pointer
+			// (lost-update race).
+			groupSpec := crud.Specification[entity.Group]{ForUpdate: true}
 			groupSpec.Model.ID = session.GroupID
 			group, err := dss.groupRepo.FindFirst(ctx, groupSpec)
 			if err != nil {

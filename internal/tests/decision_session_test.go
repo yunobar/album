@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -811,6 +812,53 @@ func TestDecisionSessionFinalize(t *testing.T) {
 
 		postFinalize(t, session.ID, "", http.StatusOK)
 		postFinalize(t, session.ID, "", http.StatusConflict)
+	})
+
+	// Regression test for the TOCTOU double-finalize race: a sequential test
+	// can't catch it because it can't force two Finalize calls to overlap
+	// their read-then-write. This fires them concurrently at the real DB and
+	// relies on ForUpdate row locking to serialize them, asserting exactly
+	// one 200 and one 409 — never two 200s (which would mean one finalize
+	// silently overwrote the other's winner).
+	t.Run("concurrency: two simultaneous finalize calls on the same session yield exactly one winner", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		group := seedTestGroup(t, nil, testProfileID)
+		content := seedTestContent(t)
+		seedActiveWatchlistItem(t, testProfileID, content.ID)
+
+		session := postCreateSession(t, group.ID, dto.CreateSessionRequest{
+			Method:              "random",
+			ParticipantIDs:      []uuid.UUID{testProfileID},
+			CandidateContentIDs: []uuid.UUID{content.ID},
+		}, http.StatusCreated)
+
+		const attempts = 10
+		codes := make([]int, attempts)
+		var wg sync.WaitGroup
+		for i := range attempts {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				w := httptest.NewRecorder()
+				req, _ := http.NewRequest(http.MethodPost, "/api/v1/sessions/"+session.ID.String()+"/finalize", nil)
+				testRouter.ServeHTTP(w, req)
+				codes[i] = w.Code
+			}(i)
+		}
+		wg.Wait()
+
+		var okCount, conflictCount int
+		for _, code := range codes {
+			switch code {
+			case http.StatusOK:
+				okCount++
+			case http.StatusConflict:
+				conflictCount++
+			}
+		}
+		assert.Equal(t, 1, okCount, "exactly one concurrent finalize call should win with 200")
+		assert.Equal(t, attempts-1, conflictCount, "every other concurrent call should 409, not silently re-resolve")
 	})
 }
 
