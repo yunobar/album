@@ -15,11 +15,21 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"github.com/yunobar/album/internal/appconstant"
+	"github.com/yunobar/album/internal/core/logger"
 	"github.com/yunobar/album/internal/core/pubsub"
 	"github.com/yunobar/album/internal/domain/dto"
 	"github.com/yunobar/album/internal/domain/entity"
 	"github.com/yunobar/album/internal/mocks"
 )
+
+// TestMain initializes the logger so decision_session_service.go's
+// logger.Errorf calls (best-effort publish-failure logging) don't panic on
+// a nil logger.Global — this package had no direct logger usage, and thus
+// no TestMain, before that logging was added.
+func TestMain(m *testing.M) {
+	logger.Init("album-test")
+	m.Run()
+}
 
 // expectTallyPublish asserts a CastVote/SubmitRanking/Select success path
 // publishes exactly one LiveTallyMessage on the session's live subject,

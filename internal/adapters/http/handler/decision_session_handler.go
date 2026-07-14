@@ -12,6 +12,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/yunobar/album/internal/appconstant"
 	"github.com/yunobar/album/internal/core/config"
+	"github.com/yunobar/album/internal/core/logger"
 	"github.com/yunobar/album/internal/core/pubsub"
 	"github.com/yunobar/album/internal/domain/dto"
 	"github.com/yunobar/album/internal/domain/service"
@@ -254,14 +255,22 @@ func (dsh *DecisionSessionHandler) HandleLive() gin.HandlerFunc {
 		if err != nil {
 			return // Upgrade already wrote its own HTTP error response
 		}
-		defer func() { _ = conn.Close() }()
+		defer func() {
+			if err := conn.Close(); err != nil {
+				logger.Errorf("error closing decision session live websocket for session %s: %v", sessionID, err)
+			}
+		}()
 
 		msgCh := make(chan *nats.Msg, 16)
 		sub, err := dsh.natsConn.ChanSubscribe(pubsub.LiveSubject(sessionID), msgCh)
 		if err != nil {
 			return
 		}
-		defer func() { _ = sub.Unsubscribe() }()
+		defer func() {
+			if err := sub.Unsubscribe(); err != nil {
+				logger.Errorf("error unsubscribing from decision session live channel for session %s: %v", sessionID, err)
+			}
+		}()
 
 		// This channel is server -> client only (no client input expected);
 		// a background read loop's only job is detecting when the client

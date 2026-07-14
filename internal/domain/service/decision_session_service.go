@@ -13,11 +13,13 @@ import (
 	"github.com/itsLeonB/go-crud"
 	"github.com/itsLeonB/ungerr"
 	"github.com/yunobar/album/internal/appconstant"
+	"github.com/yunobar/album/internal/core/logger"
 	"github.com/yunobar/album/internal/core/otel"
 	"github.com/yunobar/album/internal/core/pubsub"
 	"github.com/yunobar/album/internal/domain/dto"
 	"github.com/yunobar/album/internal/domain/entity"
 	"github.com/yunobar/album/internal/domain/mapper"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type DecisionSessionService interface {
@@ -538,7 +540,7 @@ func (dss *decisionSessionServiceImpl) CastVote(ctx context.Context, profileID, 
 	if err != nil {
 		return dto.TallyResponse{}, err
 	}
-	dss.publishTally(sessionID, tally)
+	dss.publishTally(ctx, sessionID, tally)
 	return dto.TallyResponse{Tally: tally}, nil
 }
 
@@ -597,7 +599,7 @@ func (dss *decisionSessionServiceImpl) SubmitRanking(ctx context.Context, profil
 	if err != nil {
 		return dto.TallyResponse{}, err
 	}
-	dss.publishTally(sessionID, tally)
+	dss.publishTally(ctx, sessionID, tally)
 	return dto.TallyResponse{Tally: tally}, nil
 }
 
@@ -631,7 +633,7 @@ func (dss *decisionSessionServiceImpl) Select(ctx context.Context, profileID, se
 	if err != nil {
 		return dto.TallyResponse{}, err
 	}
-	dss.publishTally(sessionID, tally)
+	dss.publishTally(ctx, sessionID, tally)
 	return dto.TallyResponse{Tally: tally}, nil
 }
 
@@ -640,14 +642,22 @@ func (dss *decisionSessionServiceImpl) Select(ctx context.Context, profileID, se
 // error) must never fail the request: the vote/ranking/select itself
 // already succeeded and was persisted, and a client that misses the live
 // update re-fetches GET /sessions/:id per the API contract's reconnect
-// story. The existing otel span on each caller already gives observability
-// for this method's own duration; no new logging infra is added here.
-func (dss *decisionSessionServiceImpl) publishTally(sessionID uuid.UUID, tally any) {
+// story. The failure is still surfaced, not silently dropped: logged, and
+// recorded on the caller's span without raising its status to Error (the
+// request itself didn't fail — only the best-effort live push did).
+func (dss *decisionSessionServiceImpl) publishTally(ctx context.Context, sessionID uuid.UUID, tally any) {
+	span := trace.SpanFromContext(ctx)
+
 	data, err := json.Marshal(dto.LiveTallyMessage{Type: "tally", Tally: tally})
 	if err != nil {
+		logger.Errorf("error marshaling tally for session %s: %v", sessionID, err)
+		span.RecordError(err)
 		return
 	}
-	_ = dss.publisher.Publish(pubsub.LiveSubject(sessionID), data)
+	if err := dss.publisher.Publish(pubsub.LiveSubject(sessionID), data); err != nil {
+		logger.Errorf("error publishing tally for session %s: %v", sessionID, err)
+		span.RecordError(err)
+	}
 }
 
 func (dss *decisionSessionServiceImpl) Finalize(ctx context.Context, profileID, sessionID uuid.UUID) (dto.SessionResponse, error) {
@@ -784,13 +794,20 @@ func (dss *decisionSessionServiceImpl) Finalize(ctx context.Context, profileID, 
 
 	// Published after the transaction commits successfully, using the
 	// already-known winnerID/now — never publish a winner that didn't
-	// actually get persisted.
-	if data, err := json.Marshal(dto.LiveWinnerMessage{
+	// actually get persisted. A publish failure is logged and recorded on
+	// this span (status stays as-is, not Error — Finalize itself already
+	// succeeded) rather than silently dropped.
+	data, err := json.Marshal(dto.LiveWinnerMessage{
 		Type:            "winner",
 		WinnerContentID: winnerID,
 		FinalizedAt:     now,
-	}); err == nil {
-		_ = dss.publisher.Publish(pubsub.LiveSubject(sessionID), data)
+	})
+	if err != nil {
+		logger.Errorf("error marshaling winner message for session %s: %v", sessionID, err)
+		span.RecordError(err)
+	} else if err := dss.publisher.Publish(pubsub.LiveSubject(sessionID), data); err != nil {
+		logger.Errorf("error publishing winner for session %s: %v", sessionID, err)
+		span.RecordError(err)
 	}
 
 	return dss.Get(ctx, profileID, sessionID)
