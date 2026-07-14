@@ -14,6 +14,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/yunobar/album/internal/adapters/http/handler"
 	"github.com/yunobar/album/internal/appconstant"
+	"github.com/yunobar/album/internal/core/config"
 	"github.com/yunobar/album/internal/core/logger"
 	"github.com/yunobar/album/internal/core/pubsub"
 	"github.com/yunobar/album/internal/domain/dto"
@@ -36,6 +37,11 @@ var (
 	currentContentService service.ContentService
 )
 
+// testClientOrigin is the only origin the WS upgrader (decision_session_handler.go)
+// accepts in tests. It stands in for config.Global.ClientUrls, matching the
+// frontend origin used elsewhere in .env.example (e.g. OAUTH_GOOGLE_REDIRECT_URL).
+const testClientOrigin = "http://localhost:5173"
+
 func TestMain(m *testing.M) {
 	db, cleanup, err := testhelpers.SetupTestDB("../../.env.test")
 	if err != nil {
@@ -48,6 +54,14 @@ func TestMain(m *testing.M) {
 	nc, natsCleanup := testhelpers.SetupTestNATS()
 	testNATS = nc
 	defer natsCleanup()
+
+	// ponytail: this test binary never calls config.Load() (it wires repos/
+	// services directly against testDB/testNATS, not the full env-loaded
+	// config.Global), so config.Global is otherwise nil here. The WS upgrader
+	// needs config.Global.ClientUrls for its Origin allowlist, so set just
+	// that field directly rather than pulling in config.Load()'s full set of
+	// required env vars (DB/MAIL/OAUTH/OTEL/TMDB) for one field.
+	config.Global = &config.Config{App: config.App{ClientUrls: []string{testClientOrigin}}}
 
 	logger.Init("album-test")
 	testRouter = setupTestRouter(db)

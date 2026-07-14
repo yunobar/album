@@ -894,6 +894,52 @@ func TestDecisionSessionLive(t *testing.T) {
 		assert.Equal(t, http.StatusNotFound, w.Code)
 	})
 
+	// Not NATS-gated: a rejected Origin fails the WS upgrade itself, before
+	// the handler ever reaches ChanSubscribe.
+	t.Run("rejects the WS upgrade when Origin is missing or not allowlisted", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		group := seedTestGroup(t, nil, testProfileID)
+		content := seedTestContent(t)
+		seedActiveWatchlistItem(t, testProfileID, content.ID)
+
+		session := postCreateSession(t, group.ID, dto.CreateSessionRequest{
+			Method:              "majority",
+			ParticipantIDs:      []uuid.UUID{testProfileID},
+			CandidateContentIDs: []uuid.UUID{content.ID},
+		}, http.StatusCreated)
+
+		httpServer := httptest.NewServer(testRouter)
+		defer httpServer.Close()
+
+		wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/api/v1/sessions/" + session.ID.String() + "/live"
+
+		t.Run("no Origin header", func(t *testing.T) {
+			header := http.Header{}
+			header.Set(testProfileIDHeader, testProfileID.String())
+			conn, resp, err := websocket.DefaultDialer.Dial(wsURL, header)
+			require.Error(t, err)
+			if conn != nil {
+				_ = conn.Close()
+			}
+			require.NotNil(t, resp)
+			assert.NotEqual(t, http.StatusSwitchingProtocols, resp.StatusCode)
+		})
+
+		t.Run("Origin not in the allowlist", func(t *testing.T) {
+			header := http.Header{}
+			header.Set(testProfileIDHeader, testProfileID.String())
+			header.Set("Origin", "http://evil.example.com")
+			conn, resp, err := websocket.DefaultDialer.Dial(wsURL, header)
+			require.Error(t, err)
+			if conn != nil {
+				_ = conn.Close()
+			}
+			require.NotNil(t, resp)
+			assert.NotEqual(t, http.StatusSwitchingProtocols, resp.StatusCode)
+		})
+	})
+
 	// NATS-gated: exercises the genuine publish -> NATS -> subscribe ->
 	// forward path end to end, so it needs a reachable local (or CI)
 	// NATS server — skips gracefully via RequireTestNATS otherwise.
@@ -920,6 +966,7 @@ func TestDecisionSessionLive(t *testing.T) {
 		wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/api/v1/sessions/" + session.ID.String() + "/live"
 		header := http.Header{}
 		header.Set(testProfileIDHeader, testProfileID.String())
+		header.Set("Origin", testClientOrigin)
 		conn, _, err := websocket.DefaultDialer.Dial(wsURL, header)
 		require.NoError(t, err)
 		defer func() { _ = conn.Close() }()

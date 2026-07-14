@@ -2,6 +2,7 @@ package handler
 
 import (
 	"net/http"
+	"slices"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -10,6 +11,7 @@ import (
 	"github.com/itsLeonB/ginkgo/pkg/server"
 	"github.com/nats-io/nats.go"
 	"github.com/yunobar/album/internal/appconstant"
+	"github.com/yunobar/album/internal/core/config"
 	"github.com/yunobar/album/internal/core/pubsub"
 	"github.com/yunobar/album/internal/domain/dto"
 	"github.com/yunobar/album/internal/domain/service"
@@ -25,13 +27,17 @@ func NewDecisionSessionHandler(decisionSessionService service.DecisionSessionSer
 }
 
 var wsUpgrader = websocket.Upgrader{
-	// ponytail: origin/CSRF enforcement for the WS handshake is the same
-	// session-cookie auth every other route already gets from
-	// authMiddleware (this route sits in the same protectedRoutes group) —
-	// CheckOrigin here would be redundant defense, add real origin
-	// allowlisting only if this API is ever exposed to browsers outside
-	// this project's own frontend origin.
-	CheckOrigin: func(r *http.Request) bool { return true },
+	// WS handshakes get no CORS preflight and the browser WebSocket
+	// constructor can't set custom headers, so header-based CSRF defenses
+	// used elsewhere can't apply here. Check Origin against the same
+	// allowlist used for CORS instead.
+	CheckOrigin: func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return false
+		}
+		return slices.Contains(config.Global.ClientUrls, origin)
+	},
 }
 
 // HandleCreate godoc
