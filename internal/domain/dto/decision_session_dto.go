@@ -12,6 +12,33 @@ type CreateSessionRequest struct {
 	CandidateContentIDs []uuid.UUID `json:"candidateContentIds" binding:"required,min=1,dive,required"`
 }
 
+type CastVoteRequest struct {
+	ContentID uuid.UUID `json:"contentId" binding:"required"`
+}
+
+type SubmitRankingRequest struct {
+	Ranking []uuid.UUID `json:"ranking" binding:"required,min=1,dive,required"`
+}
+
+type TallyResponse struct {
+	Tally any `json:"tally"`
+}
+
+type CountsTally struct {
+	Counts map[string]int `json:"counts"`
+}
+
+type RankedTally struct {
+	Round                  int            `json:"round"`
+	ActiveCandidateIDs     []uuid.UUID    `json:"activeCandidateIds"`
+	EliminatedCandidateIDs []uuid.UUID    `json:"eliminatedCandidateIds"`
+	Counts                 map[string]int `json:"counts"`
+}
+
+type SelectionTally struct {
+	SelectedContentID *uuid.UUID `json:"selectedContentId"`
+}
+
 type SessionResponse struct {
 	ID                      uuid.UUID         `json:"id"`
 	GroupID                 uuid.UUID         `json:"groupId"`

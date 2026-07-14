@@ -39,7 +39,9 @@ func TestDecisionSessionCreate(t *testing.T) {
 		assert.Equal(t, "majority", resp.Method)
 		assert.Equal(t, "voting", resp.Status)
 		assert.Nil(t, resp.CurrentChooserProfileID, "majority has no chooser concept")
-		assert.Nil(t, resp.Tally)
+		// Majority now has a live tally (Task 3) — zero votes cast yet, so
+		// it's a CountsTally with an empty map, not null.
+		assert.Equal(t, map[string]any{"counts": map[string]any{}}, resp.Tally)
 		assert.Nil(t, resp.WinnerContentID)
 		assert.Nil(t, resp.FinalizedAt)
 
@@ -268,4 +270,308 @@ func seedActiveWatchlistItem(t *testing.T, profileID, contentID uuid.UUID) {
 		Priority:  "medium",
 		Status:    "active",
 	}).Error)
+}
+
+// countsTallyEnvelope decodes just the shape TallyResponse/SessionResponse
+// take when method is majority/ranked — {"tally":{"counts":{...}}} — without
+// resorting to `any` type assertions in every test.
+type countsTallyEnvelope struct {
+	Tally struct {
+		Counts map[string]int `json:"counts"`
+	} `json:"tally"`
+}
+
+// selectionTallyEnvelope is the round_robin equivalent —
+// {"tally":{"selectedContentId":"..."}}.
+type selectionTallyEnvelope struct {
+	Tally struct {
+		SelectedContentID *uuid.UUID `json:"selectedContentId"`
+	} `json:"tally"`
+}
+
+// postSessionAction POSTs body to /api/v1/sessions/{sessionID}/{action} as
+// callerProfileID (default test caller when empty) and asserts wantStatus.
+// Returns the raw response body for the caller to decode per-endpoint.
+func postSessionAction(t *testing.T, sessionID uuid.UUID, action string, body any, callerProfileID string, wantStatus int) []byte {
+	t.Helper()
+
+	b, err := json.Marshal(body)
+	require.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	httpReq, _ := http.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/"+action, bytes.NewReader(b))
+	httpReq.Header.Set("Content-Type", "application/json")
+	if callerProfileID != "" {
+		httpReq.Header.Set(testProfileIDHeader, callerProfileID)
+	}
+	testRouter.ServeHTTP(w, httpReq)
+	require.Equal(t, wantStatus, w.Code, w.Body.String())
+
+	return w.Body.Bytes()
+}
+
+func TestDecisionSessionCastVote(t *testing.T) {
+	testhelpers.RequireTestDB(t, testDB)
+
+	t.Run("round-trips votes, replacing rather than stacking a resubmit", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		bob := seedTestProfile(t, "Bob")
+		group := seedTestGroup(t, nil, testProfileID, bob.ID)
+		content1 := seedTestContent(t)
+		content2 := seedTestContent(t)
+		seedActiveWatchlistItem(t, testProfileID, content1.ID)
+		seedActiveWatchlistItem(t, bob.ID, content2.ID)
+
+		session := postCreateSession(t, group.ID, dto.CreateSessionRequest{
+			Method:              "majority",
+			ParticipantIDs:      []uuid.UUID{testProfileID, bob.ID},
+			CandidateContentIDs: []uuid.UUID{content1.ID, content2.ID},
+		}, http.StatusCreated)
+
+		// Each response is decoded into a fresh envelope — json.Unmarshal
+		// merges into an existing map rather than clearing it first, so
+		// reusing one across calls would leak stale keys from an earlier
+		// response into a later assertion.
+		body := postSessionAction(t, session.ID, "votes", dto.CastVoteRequest{ContentID: content1.ID}, "", http.StatusOK)
+		var env1 countsTallyEnvelope
+		require.NoError(t, json.Unmarshal(body, mustDataEnvelope(&env1)))
+		assert.Equal(t, 1, env1.Tally.Counts[content1.ID.String()])
+
+		body = postSessionAction(t, session.ID, "votes", dto.CastVoteRequest{ContentID: content1.ID}, bob.ID.String(), http.StatusOK)
+		var env2 countsTallyEnvelope
+		require.NoError(t, json.Unmarshal(body, mustDataEnvelope(&env2)))
+		assert.Equal(t, 2, env2.Tally.Counts[content1.ID.String()])
+
+		// testProfileID changes their mind — replace, not stack.
+		body = postSessionAction(t, session.ID, "votes", dto.CastVoteRequest{ContentID: content2.ID}, "", http.StatusOK)
+		var env3 countsTallyEnvelope
+		require.NoError(t, json.Unmarshal(body, mustDataEnvelope(&env3)))
+		assert.Equal(t, 1, env3.Tally.Counts[content1.ID.String()])
+		assert.Equal(t, 1, env3.Tally.Counts[content2.ID.String()])
+
+		getBody, err := json.Marshal(getSession(t, session.ID, "", http.StatusOK))
+		require.NoError(t, err)
+		var getEnv countsTallyEnvelope
+		require.NoError(t, json.Unmarshal(getBody, &getEnv))
+		assert.Equal(t, 1, getEnv.Tally.Counts[content1.ID.String()])
+		assert.Equal(t, 1, getEnv.Tally.Counts[content2.ID.String()])
+	})
+
+	t.Run("400s on a non-candidate contentId", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		group := seedTestGroup(t, nil, testProfileID)
+		content := seedTestContent(t)
+		offCandidate := seedTestContent(t)
+		seedActiveWatchlistItem(t, testProfileID, content.ID)
+
+		session := postCreateSession(t, group.ID, dto.CreateSessionRequest{
+			Method:              "majority",
+			ParticipantIDs:      []uuid.UUID{testProfileID},
+			CandidateContentIDs: []uuid.UUID{content.ID},
+		}, http.StatusCreated)
+
+		postSessionAction(t, session.ID, "votes", dto.CastVoteRequest{ContentID: offCandidate.ID}, "", http.StatusBadRequest)
+	})
+
+	t.Run("400s when posting to /votes on a ranked-method session", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		group := seedTestGroup(t, nil, testProfileID)
+		content := seedTestContent(t)
+		seedActiveWatchlistItem(t, testProfileID, content.ID)
+
+		session := postCreateSession(t, group.ID, dto.CreateSessionRequest{
+			Method:              "ranked",
+			ParticipantIDs:      []uuid.UUID{testProfileID},
+			CandidateContentIDs: []uuid.UUID{content.ID},
+		}, http.StatusCreated)
+
+		postSessionAction(t, session.ID, "votes", dto.CastVoteRequest{ContentID: content.ID}, "", http.StatusBadRequest)
+	})
+
+	t.Run("404s for a group member who is not a session participant", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		bob := seedTestProfile(t, "Bob")
+		group := seedTestGroup(t, nil, testProfileID, bob.ID)
+		content := seedTestContent(t)
+		seedActiveWatchlistItem(t, testProfileID, content.ID)
+
+		session := postCreateSession(t, group.ID, dto.CreateSessionRequest{
+			Method:              "majority",
+			ParticipantIDs:      []uuid.UUID{testProfileID},
+			CandidateContentIDs: []uuid.UUID{content.ID},
+		}, http.StatusCreated)
+
+		postSessionAction(t, session.ID, "votes", dto.CastVoteRequest{ContentID: content.ID}, bob.ID.String(), http.StatusNotFound)
+	})
+
+	t.Run("409s once the session is no longer open for voting", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		group := seedTestGroup(t, nil, testProfileID)
+		content := seedTestContent(t)
+		seedActiveWatchlistItem(t, testProfileID, content.ID)
+
+		session := postCreateSession(t, group.ID, dto.CreateSessionRequest{
+			Method:              "majority",
+			ParticipantIDs:      []uuid.UUID{testProfileID},
+			CandidateContentIDs: []uuid.UUID{content.ID},
+		}, http.StatusCreated)
+
+		require.NoError(t, testDB.Model(&entity.DecisionSession{}).Where("id = ?", session.ID).Update("status", "completed").Error)
+
+		postSessionAction(t, session.ID, "votes", dto.CastVoteRequest{ContentID: content.ID}, "", http.StatusConflict)
+	})
+}
+
+func TestDecisionSessionSubmitRanking(t *testing.T) {
+	testhelpers.RequireTestDB(t, testDB)
+
+	t.Run("round-trips a ranked ballot, replacing rather than accumulating on resubmit", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		bob := seedTestProfile(t, "Bob")
+		group := seedTestGroup(t, nil, testProfileID, bob.ID)
+		content1 := seedTestContent(t)
+		content2 := seedTestContent(t)
+		seedActiveWatchlistItem(t, testProfileID, content1.ID)
+		seedActiveWatchlistItem(t, bob.ID, content2.ID)
+
+		session := postCreateSession(t, group.ID, dto.CreateSessionRequest{
+			Method:              "ranked",
+			ParticipantIDs:      []uuid.UUID{testProfileID, bob.ID},
+			CandidateContentIDs: []uuid.UUID{content1.ID, content2.ID},
+		}, http.StatusCreated)
+
+		// testProfileID ranks content2 first, bob ranks content1 first.
+		// Each response is decoded into a fresh envelope — see the /votes
+		// test above for why reusing one across calls is unsafe.
+		postSessionAction(t, session.ID, "rankings", dto.SubmitRankingRequest{Ranking: []uuid.UUID{content2.ID, content1.ID}}, "", http.StatusOK)
+		body := postSessionAction(t, session.ID, "rankings", dto.SubmitRankingRequest{Ranking: []uuid.UUID{content1.ID, content2.ID}}, bob.ID.String(), http.StatusOK)
+
+		var env1 countsTallyEnvelope
+		require.NoError(t, json.Unmarshal(body, mustDataEnvelope(&env1)))
+		assert.Equal(t, 1, env1.Tally.Counts[content1.ID.String()])
+		assert.Equal(t, 1, env1.Tally.Counts[content2.ID.String()])
+
+		// testProfileID resubmits, now ranking content1 first — replaces
+		// their prior ballot rather than adding a second one.
+		body = postSessionAction(t, session.ID, "rankings", dto.SubmitRankingRequest{Ranking: []uuid.UUID{content1.ID, content2.ID}}, "", http.StatusOK)
+		var env2 countsTallyEnvelope
+		require.NoError(t, json.Unmarshal(body, mustDataEnvelope(&env2)))
+		assert.Equal(t, 2, env2.Tally.Counts[content1.ID.String()])
+		assert.Equal(t, 0, env2.Tally.Counts[content2.ID.String()])
+
+		getBody, err := json.Marshal(getSession(t, session.ID, "", http.StatusOK))
+		require.NoError(t, err)
+		var getEnv countsTallyEnvelope
+		require.NoError(t, json.Unmarshal(getBody, &getEnv))
+		assert.Equal(t, 2, getEnv.Tally.Counts[content1.ID.String()])
+	})
+
+	t.Run("400s on a duplicate candidate in the ranking", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		group := seedTestGroup(t, nil, testProfileID)
+		content := seedTestContent(t)
+		seedActiveWatchlistItem(t, testProfileID, content.ID)
+
+		session := postCreateSession(t, group.ID, dto.CreateSessionRequest{
+			Method:              "ranked",
+			ParticipantIDs:      []uuid.UUID{testProfileID},
+			CandidateContentIDs: []uuid.UUID{content.ID},
+		}, http.StatusCreated)
+
+		postSessionAction(t, session.ID, "rankings", dto.SubmitRankingRequest{Ranking: []uuid.UUID{content.ID, content.ID}}, "", http.StatusBadRequest)
+	})
+
+	t.Run("400s on a non-candidate entry", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		group := seedTestGroup(t, nil, testProfileID)
+		content := seedTestContent(t)
+		offCandidate := seedTestContent(t)
+		seedActiveWatchlistItem(t, testProfileID, content.ID)
+
+		session := postCreateSession(t, group.ID, dto.CreateSessionRequest{
+			Method:              "ranked",
+			ParticipantIDs:      []uuid.UUID{testProfileID},
+			CandidateContentIDs: []uuid.UUID{content.ID},
+		}, http.StatusCreated)
+
+		postSessionAction(t, session.ID, "rankings", dto.SubmitRankingRequest{Ranking: []uuid.UUID{content.ID, offCandidate.ID}}, "", http.StatusBadRequest)
+	})
+}
+
+func TestDecisionSessionSelect(t *testing.T) {
+	testhelpers.RequireTestDB(t, testDB)
+
+	t.Run("chooser's pick round-trips through GET; a non-chooser is forbidden", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		bob := seedTestProfile(t, "Bob")
+		group := seedTestGroup(t, nil, testProfileID, bob.ID)
+		content := seedTestContent(t)
+		seedActiveWatchlistItem(t, testProfileID, content.ID)
+
+		session := postCreateSession(t, group.ID, dto.CreateSessionRequest{
+			Method:              "roundRobin",
+			ParticipantIDs:      []uuid.UUID{testProfileID, bob.ID},
+			CandidateContentIDs: []uuid.UUID{content.ID},
+		}, http.StatusCreated)
+		require.NotNil(t, session.CurrentChooserProfileID)
+
+		// nonChooser/chooserHeader: "" means the default test caller
+		// (testProfileID). Whichever of the two participants the server
+		// picked as chooser, the other one is the non-chooser.
+		nonChooser, chooserHeader := bob.ID, ""
+		if *session.CurrentChooserProfileID != testProfileID {
+			nonChooser, chooserHeader = testProfileID, session.CurrentChooserProfileID.String()
+		}
+		postSessionAction(t, session.ID, "select", dto.CastVoteRequest{ContentID: content.ID}, nonChooser.String(), http.StatusForbidden)
+
+		body := postSessionAction(t, session.ID, "select", dto.CastVoteRequest{ContentID: content.ID}, chooserHeader, http.StatusOK)
+
+		var env selectionTallyEnvelope
+		require.NoError(t, json.Unmarshal(body, mustDataEnvelope(&env)))
+		require.NotNil(t, env.Tally.SelectedContentID)
+		assert.Equal(t, content.ID, *env.Tally.SelectedContentID)
+
+		getBody, err := json.Marshal(getSession(t, session.ID, "", http.StatusOK))
+		require.NoError(t, err)
+		var getEnv selectionTallyEnvelope
+		require.NoError(t, json.Unmarshal(getBody, &getEnv))
+		require.NotNil(t, getEnv.Tally.SelectedContentID)
+		assert.Equal(t, content.ID, *getEnv.Tally.SelectedContentID)
+	})
+
+	t.Run("400s when posting to /select on a random-method session", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		group := seedTestGroup(t, nil, testProfileID)
+		content := seedTestContent(t)
+		seedActiveWatchlistItem(t, testProfileID, content.ID)
+
+		session := postCreateSession(t, group.ID, dto.CreateSessionRequest{
+			Method:              "random",
+			ParticipantIDs:      []uuid.UUID{testProfileID},
+			CandidateContentIDs: []uuid.UUID{content.ID},
+		}, http.StatusCreated)
+
+		postSessionAction(t, session.ID, "select", dto.CastVoteRequest{ContentID: content.ID}, "", http.StatusBadRequest)
+	})
+}
+
+// mustDataEnvelope wraps env in the {"data": ...} shape every handler in
+// this codebase responds with, so callers can json.Unmarshal the raw POST
+// body straight into it.
+func mustDataEnvelope(env any) *struct {
+	Data any `json:"data"`
+} {
+	return &struct {
+		Data any `json:"data"`
+	}{Data: env}
 }

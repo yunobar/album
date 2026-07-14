@@ -77,3 +77,106 @@ func (dsh *DecisionSessionHandler) HandleGet() gin.HandlerFunc {
 		return dsh.decisionSessionService.Get(ctx.Request.Context(), profileID, sessionID)
 	})
 }
+
+// HandleCastVote godoc
+// @Summary      Cast or replace a Majority-method vote
+// @Tags         sessions
+// @Security     BearerAuth
+// @Accept       json
+// @Produce      json
+// @Param        sessionID path string true "Session ID"
+// @Param        body body dto.CastVoteRequest true "Cast vote payload"
+// @Success      200  {object}  response.JSONResponse[dto.TallyResponse]
+// @Failure      400  {object}  map[string]any
+// @Failure      404  {object}  map[string]any
+// @Failure      409  {object}  map[string]any
+// @Router       /sessions/{sessionID}/votes [post]
+func (dsh *DecisionSessionHandler) HandleCastVote() gin.HandlerFunc {
+	return server.Handler("DecisionSessionHandler.HandleCastVote", http.StatusOK, func(ctx *gin.Context) (any, error) {
+		profileID, err := getProfileID(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		sessionID, err := server.GetRequiredPathParam[uuid.UUID](ctx, appconstant.ContextSessionID.String())
+		if err != nil {
+			return nil, err
+		}
+
+		request, err := server.BindJSON[dto.CastVoteRequest](ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		return dsh.decisionSessionService.CastVote(ctx.Request.Context(), profileID, sessionID, request)
+	})
+}
+
+// HandleSubmitRanking godoc
+// @Summary      Submit or replace a Ranked-Choice ballot
+// @Tags         sessions
+// @Security     BearerAuth
+// @Accept       json
+// @Produce      json
+// @Param        sessionID path string true "Session ID"
+// @Param        body body dto.SubmitRankingRequest true "Submit ranking payload"
+// @Success      200  {object}  response.JSONResponse[dto.TallyResponse]
+// @Failure      400  {object}  map[string]any
+// @Failure      404  {object}  map[string]any
+// @Failure      409  {object}  map[string]any
+// @Router       /sessions/{sessionID}/rankings [post]
+func (dsh *DecisionSessionHandler) HandleSubmitRanking() gin.HandlerFunc {
+	return server.Handler("DecisionSessionHandler.HandleSubmitRanking", http.StatusOK, func(ctx *gin.Context) (any, error) {
+		profileID, err := getProfileID(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		sessionID, err := server.GetRequiredPathParam[uuid.UUID](ctx, appconstant.ContextSessionID.String())
+		if err != nil {
+			return nil, err
+		}
+
+		request, err := server.BindJSON[dto.SubmitRankingRequest](ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		return dsh.decisionSessionService.SubmitRanking(ctx.Request.Context(), profileID, sessionID, request)
+	})
+}
+
+// HandleSelect godoc
+// @Summary      Round Robin chooser pick
+// @Tags         sessions
+// @Security     BearerAuth
+// @Accept       json
+// @Produce      json
+// @Param        sessionID path string true "Session ID"
+// @Param        body body dto.CastVoteRequest true "Select payload"
+// @Success      200  {object}  response.JSONResponse[dto.TallyResponse]
+// @Failure      400  {object}  map[string]any
+// @Failure      403  {object}  map[string]any
+// @Failure      404  {object}  map[string]any
+// @Failure      409  {object}  map[string]any
+// @Router       /sessions/{sessionID}/select [post]
+func (dsh *DecisionSessionHandler) HandleSelect() gin.HandlerFunc {
+	return server.Handler("DecisionSessionHandler.HandleSelect", http.StatusOK, func(ctx *gin.Context) (any, error) {
+		profileID, err := getProfileID(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		sessionID, err := server.GetRequiredPathParam[uuid.UUID](ctx, appconstant.ContextSessionID.String())
+		if err != nil {
+			return nil, err
+		}
+
+		request, err := server.BindJSON[dto.CastVoteRequest](ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		return dsh.decisionSessionService.Select(ctx.Request.Context(), profileID, sessionID, request)
+	})
+}

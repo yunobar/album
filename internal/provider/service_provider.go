@@ -64,6 +64,8 @@ func ProvideServices(
 		repos.Group,
 		repos.Watchlist,
 		repos.SessionPrioritySnapshot,
+		repos.SessionVote,
+		repos.SessionRanking,
 	)
 
 	return &Services{

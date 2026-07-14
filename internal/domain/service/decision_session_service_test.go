@@ -30,6 +30,8 @@ func newTestDecisionSessionService(t *testing.T) (
 	*mocks.MockRepository[entity.Group],
 	*mocks.MockRepository[entity.WatchlistItem],
 	*mocks.MockRepository[entity.SessionPrioritySnapshot],
+	*mocks.MockRepository[entity.SessionVote],
+	*mocks.MockRepository[entity.SessionRanking],
 ) {
 	t.Helper()
 
@@ -48,6 +50,8 @@ func newTestDecisionSessionService(t *testing.T) (
 	groupRepo := mocks.NewMockRepository[entity.Group](t)
 	watchlistRepo := mocks.NewMockRepository[entity.WatchlistItem](t)
 	snapshotRepo := mocks.NewMockRepository[entity.SessionPrioritySnapshot](t)
+	sessionVoteRepo := mocks.NewMockRepository[entity.SessionVote](t)
+	sessionRankingRepo := mocks.NewMockRepository[entity.SessionRanking](t)
 
 	svc := NewDecisionSessionService(
 		transactor,
@@ -58,9 +62,11 @@ func newTestDecisionSessionService(t *testing.T) (
 		groupRepo,
 		watchlistRepo,
 		snapshotRepo,
+		sessionVoteRepo,
+		sessionRankingRepo,
 	)
 
-	return svc, decisionSessionRepo, sessionParticipantRepo, sessionCandidateRepo, groupMemberRepo, groupRepo, watchlistRepo, snapshotRepo
+	return svc, decisionSessionRepo, sessionParticipantRepo, sessionCandidateRepo, groupMemberRepo, groupRepo, watchlistRepo, snapshotRepo, sessionVoteRepo, sessionRankingRepo
 }
 
 func TestDecisionSessionService_CapturePrioritySnapshots(t *testing.T) {
@@ -72,7 +78,7 @@ func TestDecisionSessionService_CapturePrioritySnapshots(t *testing.T) {
 	offWatchlistCandidate := uuid.New()
 
 	t.Run("writes a snapshot per on-watchlist candidate and skips off-watchlist ones", func(t *testing.T) {
-		svc, _, _, _, _, _, watchlistRepo, snapshotRepo := newTestDecisionSessionService(t)
+		svc, _, _, _, _, _, watchlistRepo, snapshotRepo, _, _ := newTestDecisionSessionService(t)
 
 		// profileA has both candidates actively watchlisted.
 		watchlistRepo.EXPECT().
@@ -113,7 +119,7 @@ func TestDecisionSessionService_CapturePrioritySnapshots(t *testing.T) {
 	})
 
 	t.Run("writes no rows and does not call InsertMany when nothing matches", func(t *testing.T) {
-		svc, _, _, _, _, _, watchlistRepo, snapshotRepo := newTestDecisionSessionService(t)
+		svc, _, _, _, _, _, watchlistRepo, snapshotRepo, _, _ := newTestDecisionSessionService(t)
 
 		watchlistRepo.EXPECT().
 			FindAll(mock.Anything, mock.Anything).
@@ -130,7 +136,7 @@ func TestDecisionSessionService_CapturePrioritySnapshots(t *testing.T) {
 	})
 
 	t.Run("propagates FindAll error", func(t *testing.T) {
-		svc, _, _, _, _, _, watchlistRepo, _ := newTestDecisionSessionService(t)
+		svc, _, _, _, _, _, watchlistRepo, _, _, _ := newTestDecisionSessionService(t)
 
 		wantErr := errors.New("db error")
 		watchlistRepo.EXPECT().
@@ -147,7 +153,7 @@ func TestDecisionSessionService_CapturePrioritySnapshots(t *testing.T) {
 	})
 
 	t.Run("propagates InsertMany error", func(t *testing.T) {
-		svc, _, _, _, _, _, watchlistRepo, snapshotRepo := newTestDecisionSessionService(t)
+		svc, _, _, _, _, _, watchlistRepo, snapshotRepo, _, _ := newTestDecisionSessionService(t)
 
 		watchlistRepo.EXPECT().
 			FindAll(mock.Anything, mock.Anything).
@@ -181,7 +187,7 @@ func TestDecisionSessionService_Create(t *testing.T) {
 	groupID := uuid.New()
 
 	t.Run("rejects a caller who is not a member of the group", func(t *testing.T) {
-		svc, _, _, _, groupMemberRepo, _, _, _ := newTestDecisionSessionService(t)
+		svc, _, _, _, groupMemberRepo, _, _, _, _, _ := newTestDecisionSessionService(t)
 
 		caller := uuid.New()
 		otherMember := uuid.New()
@@ -205,7 +211,7 @@ func TestDecisionSessionService_Create(t *testing.T) {
 	})
 
 	t.Run("rejects a participantId that isn't a group member", func(t *testing.T) {
-		svc, _, _, _, groupMemberRepo, _, _, _ := newTestDecisionSessionService(t)
+		svc, _, _, _, groupMemberRepo, _, _, _, _, _ := newTestDecisionSessionService(t)
 
 		caller := uuid.New()
 		outsider := uuid.New()
@@ -229,7 +235,7 @@ func TestDecisionSessionService_Create(t *testing.T) {
 	})
 
 	t.Run("propagates the membership lookup error", func(t *testing.T) {
-		svc, _, _, _, groupMemberRepo, _, _, _ := newTestDecisionSessionService(t)
+		svc, _, _, _, groupMemberRepo, _, _, _, _, _ := newTestDecisionSessionService(t)
 
 		wantErr := errors.New("db error")
 		groupMemberRepo.EXPECT().FindAll(mock.Anything, mock.Anything).Return(nil, wantErr)
@@ -257,4 +263,314 @@ func TestGenerateRandomSeed(t *testing.T) {
 	assert.NotZero(t, seed1)
 	assert.NotZero(t, seed2)
 	assert.NotEqual(t, seed1, seed2, "a weak but real check the generator isn't a constant")
+}
+
+func TestDecisionSessionService_CastVote(t *testing.T) {
+	sessionID := uuid.New()
+	profileID := uuid.New()
+	candidateOne := uuid.New()
+	candidateTwo := uuid.New()
+
+	votingMajoritySession := func() entity.DecisionSession {
+		return entity.DecisionSession{
+			ID:         sessionID,
+			Method:     "majority",
+			Status:     "voting",
+			Candidates: []entity.SessionCandidate{{ContentID: candidateOne}, {ContentID: candidateTwo}},
+		}
+	}
+
+	expectParticipant := func(participantRepo *mocks.MockRepository[entity.SessionParticipant]) {
+		participantRepo.EXPECT().
+			FindFirst(mock.Anything, mock.MatchedBy(func(spec crud.Specification[entity.SessionParticipant]) bool {
+				return spec.Model.SessionID == sessionID && spec.Model.ProfileID == profileID
+			})).
+			Return(entity.SessionParticipant{BaseEntity: crud.BaseEntity{ID: uuid.New()}, SessionID: sessionID, ProfileID: profileID}, nil)
+	}
+
+	t.Run("rejects a non-majority session with 400", func(t *testing.T) {
+		svc, decisionSessionRepo, sessionParticipantRepo, _, _, _, _, _, _, _ := newTestDecisionSessionService(t)
+		expectParticipant(sessionParticipantRepo)
+
+		session := votingMajoritySession()
+		session.Method = "ranked"
+		decisionSessionRepo.EXPECT().FindFirst(mock.Anything, mock.Anything).Return(session, nil)
+
+		_, err := svc.CastVote(context.Background(), profileID, sessionID, dto.CastVoteRequest{ContentID: candidateOne})
+
+		require.Error(t, err)
+		var appErr ungerr.AppError
+		require.ErrorAs(t, err, &appErr)
+		assert.Equal(t, http.StatusBadRequest, appErr.HttpStatus())
+	})
+
+	t.Run("rejects a non-candidate contentId with 400", func(t *testing.T) {
+		svc, decisionSessionRepo, sessionParticipantRepo, _, _, _, _, _, _, _ := newTestDecisionSessionService(t)
+		expectParticipant(sessionParticipantRepo)
+		decisionSessionRepo.EXPECT().FindFirst(mock.Anything, mock.Anything).Return(votingMajoritySession(), nil)
+
+		_, err := svc.CastVote(context.Background(), profileID, sessionID, dto.CastVoteRequest{ContentID: uuid.New()})
+
+		require.Error(t, err)
+		var appErr ungerr.AppError
+		require.ErrorAs(t, err, &appErr)
+		assert.Equal(t, http.StatusBadRequest, appErr.HttpStatus())
+	})
+
+	t.Run("rejects a session that isn't open for voting with 409", func(t *testing.T) {
+		svc, decisionSessionRepo, sessionParticipantRepo, _, _, _, _, _, _, _ := newTestDecisionSessionService(t)
+		expectParticipant(sessionParticipantRepo)
+
+		session := votingMajoritySession()
+		session.Status = "completed"
+		decisionSessionRepo.EXPECT().FindFirst(mock.Anything, mock.Anything).Return(session, nil)
+
+		_, err := svc.CastVote(context.Background(), profileID, sessionID, dto.CastVoteRequest{ContentID: candidateOne})
+
+		require.Error(t, err)
+		var appErr ungerr.AppError
+		require.ErrorAs(t, err, &appErr)
+		assert.Equal(t, http.StatusConflict, appErr.HttpStatus())
+	})
+
+	t.Run("replaces a prior vote rather than stacking, and returns correct counts", func(t *testing.T) {
+		svc, decisionSessionRepo, sessionParticipantRepo, _, _, _, _, _, sessionVoteRepo, _ := newTestDecisionSessionService(t)
+		expectParticipant(sessionParticipantRepo)
+		decisionSessionRepo.EXPECT().FindFirst(mock.Anything, mock.Anything).Return(votingMajoritySession(), nil)
+
+		existingVote := entity.SessionVote{BaseEntity: crud.BaseEntity{ID: uuid.New()}, SessionID: sessionID, ProfileID: profileID, ContentID: candidateOne}
+		sessionVoteRepo.EXPECT().
+			FindFirst(mock.Anything, mock.MatchedBy(func(spec crud.Specification[entity.SessionVote]) bool {
+				return spec.Model.SessionID == sessionID && spec.Model.ProfileID == profileID
+			})).
+			Return(existingVote, nil)
+
+		sessionVoteRepo.EXPECT().
+			Update(mock.Anything, mock.MatchedBy(func(v entity.SessionVote) bool {
+				return v.ContentID == candidateTwo
+			})).
+			Return(entity.SessionVote{}, nil)
+		sessionVoteRepo.AssertNotCalled(t, "Insert", mock.Anything, mock.Anything)
+
+		sessionVoteRepo.EXPECT().
+			FindAll(mock.Anything, mock.MatchedBy(func(spec crud.Specification[entity.SessionVote]) bool {
+				return spec.Model.SessionID == sessionID
+			})).
+			Return([]entity.SessionVote{
+				{SessionID: sessionID, ProfileID: profileID, ContentID: candidateTwo},
+				{SessionID: sessionID, ProfileID: uuid.New(), ContentID: candidateTwo},
+			}, nil)
+
+		resp, err := svc.CastVote(context.Background(), profileID, sessionID, dto.CastVoteRequest{ContentID: candidateTwo})
+
+		require.NoError(t, err)
+		tally, ok := resp.Tally.(dto.CountsTally)
+		require.True(t, ok)
+		assert.Equal(t, 2, tally.Counts[candidateTwo.String()])
+	})
+}
+
+func TestDecisionSessionService_SubmitRanking(t *testing.T) {
+	sessionID := uuid.New()
+	profileID := uuid.New()
+	candidateOne := uuid.New()
+	candidateTwo := uuid.New()
+
+	votingRankedSession := func() entity.DecisionSession {
+		return entity.DecisionSession{
+			ID:         sessionID,
+			Method:     "ranked",
+			Status:     "voting",
+			Candidates: []entity.SessionCandidate{{ContentID: candidateOne}, {ContentID: candidateTwo}},
+		}
+	}
+
+	expectParticipant := func(participantRepo *mocks.MockRepository[entity.SessionParticipant]) {
+		participantRepo.EXPECT().
+			FindFirst(mock.Anything, mock.MatchedBy(func(spec crud.Specification[entity.SessionParticipant]) bool {
+				return spec.Model.SessionID == sessionID && spec.Model.ProfileID == profileID
+			})).
+			Return(entity.SessionParticipant{BaseEntity: crud.BaseEntity{ID: uuid.New()}, SessionID: sessionID, ProfileID: profileID}, nil)
+	}
+
+	t.Run("rejects a duplicate candidate in the ranking with 400", func(t *testing.T) {
+		svc, decisionSessionRepo, sessionParticipantRepo, _, _, _, _, _, _, _ := newTestDecisionSessionService(t)
+		expectParticipant(sessionParticipantRepo)
+		decisionSessionRepo.EXPECT().FindFirst(mock.Anything, mock.Anything).Return(votingRankedSession(), nil)
+
+		_, err := svc.SubmitRanking(context.Background(), profileID, sessionID, dto.SubmitRankingRequest{
+			Ranking: []uuid.UUID{candidateOne, candidateOne},
+		})
+
+		require.Error(t, err)
+		var appErr ungerr.AppError
+		require.ErrorAs(t, err, &appErr)
+		assert.Equal(t, http.StatusBadRequest, appErr.HttpStatus())
+	})
+
+	t.Run("rejects a non-candidate entry with 400", func(t *testing.T) {
+		svc, decisionSessionRepo, sessionParticipantRepo, _, _, _, _, _, _, _ := newTestDecisionSessionService(t)
+		expectParticipant(sessionParticipantRepo)
+		decisionSessionRepo.EXPECT().FindFirst(mock.Anything, mock.Anything).Return(votingRankedSession(), nil)
+
+		_, err := svc.SubmitRanking(context.Background(), profileID, sessionID, dto.SubmitRankingRequest{
+			Ranking: []uuid.UUID{candidateOne, uuid.New()},
+		})
+
+		require.Error(t, err)
+		var appErr ungerr.AppError
+		require.ErrorAs(t, err, &appErr)
+		assert.Equal(t, http.StatusBadRequest, appErr.HttpStatus())
+	})
+
+	t.Run("replaces the full prior ballot rather than accumulating", func(t *testing.T) {
+		svc, decisionSessionRepo, sessionParticipantRepo, _, _, _, _, _, _, sessionRankingRepo := newTestDecisionSessionService(t)
+		expectParticipant(sessionParticipantRepo)
+		decisionSessionRepo.EXPECT().FindFirst(mock.Anything, mock.Anything).Return(votingRankedSession(), nil)
+
+		priorRankings := []entity.SessionRanking{
+			{SessionID: sessionID, ProfileID: profileID, ContentID: candidateOne, Rank: 1},
+			{SessionID: sessionID, ProfileID: profileID, ContentID: candidateTwo, Rank: 2},
+		}
+		sessionRankingRepo.EXPECT().
+			FindAll(mock.Anything, mock.MatchedBy(func(spec crud.Specification[entity.SessionRanking]) bool {
+				return spec.Model.SessionID == sessionID && spec.Model.ProfileID == profileID
+			})).
+			Return(priorRankings, nil)
+
+		sessionRankingRepo.EXPECT().
+			DeleteMany(mock.Anything, priorRankings).
+			Return(nil)
+
+		sessionRankingRepo.EXPECT().
+			InsertMany(mock.Anything, []entity.SessionRanking{
+				{SessionID: sessionID, ProfileID: profileID, ContentID: candidateTwo, Rank: 1},
+				{SessionID: sessionID, ProfileID: profileID, ContentID: candidateOne, Rank: 2},
+			}).
+			Return(nil, nil)
+
+		sessionRankingRepo.EXPECT().
+			FindAll(mock.Anything, mock.MatchedBy(func(spec crud.Specification[entity.SessionRanking]) bool {
+				return spec.Model.SessionID == sessionID && spec.Model.ProfileID == uuid.Nil
+			})).
+			Return([]entity.SessionRanking{
+				{SessionID: sessionID, ProfileID: profileID, ContentID: candidateTwo, Rank: 1},
+			}, nil)
+
+		resp, err := svc.SubmitRanking(context.Background(), profileID, sessionID, dto.SubmitRankingRequest{
+			Ranking: []uuid.UUID{candidateTwo, candidateOne},
+		})
+
+		require.NoError(t, err)
+		tally, ok := resp.Tally.(dto.RankedTally)
+		require.True(t, ok)
+		assert.Equal(t, 1, tally.Counts[candidateTwo.String()])
+	})
+}
+
+func TestDecisionSessionService_Select(t *testing.T) {
+	sessionID := uuid.New()
+	groupID := uuid.New()
+	chooserProfileID := uuid.New()
+	otherProfileID := uuid.New()
+	candidateOne := uuid.New()
+
+	votingRoundRobinSession := func() entity.DecisionSession {
+		return entity.DecisionSession{
+			ID:         sessionID,
+			GroupID:    groupID,
+			Method:     "round_robin",
+			Status:     "voting",
+			Candidates: []entity.SessionCandidate{{ContentID: candidateOne}},
+			Participants: []entity.SessionParticipant{
+				{SessionID: sessionID, ProfileID: chooserProfileID},
+			},
+		}
+	}
+
+	expectParticipant := func(participantRepo *mocks.MockRepository[entity.SessionParticipant], callerID uuid.UUID) {
+		participantRepo.EXPECT().
+			FindFirst(mock.Anything, mock.MatchedBy(func(spec crud.Specification[entity.SessionParticipant]) bool {
+				return spec.Model.SessionID == sessionID && spec.Model.ProfileID == callerID
+			})).
+			Return(entity.SessionParticipant{BaseEntity: crud.BaseEntity{ID: uuid.New()}, SessionID: sessionID, ProfileID: callerID}, nil)
+	}
+
+	expectChooser := func(groupMemberRepo *mocks.MockRepository[entity.GroupMember], groupRepo *mocks.MockRepository[entity.Group]) {
+		groupMemberRepo.EXPECT().
+			FindAll(mock.Anything, mock.MatchedBy(func(spec crud.Specification[entity.GroupMember]) bool {
+				return spec.Model.GroupID == groupID
+			})).
+			Return([]entity.GroupMember{{ProfileID: chooserProfileID}}, nil)
+		groupRepo.EXPECT().
+			FindFirst(mock.Anything, mock.Anything).
+			Return(entity.Group{BaseEntity: crud.BaseEntity{ID: groupID}, RoundRobinPointer: 0}, nil)
+	}
+
+	t.Run("rejects wrong method (including random) with 400", func(t *testing.T) {
+		svc, decisionSessionRepo, sessionParticipantRepo, _, _, _, _, _, _, _ := newTestDecisionSessionService(t)
+		expectParticipant(sessionParticipantRepo, chooserProfileID)
+
+		session := votingRoundRobinSession()
+		session.Method = "random"
+		decisionSessionRepo.EXPECT().FindFirst(mock.Anything, mock.Anything).Return(session, nil)
+
+		_, err := svc.Select(context.Background(), chooserProfileID, sessionID, dto.CastVoteRequest{ContentID: candidateOne})
+
+		require.Error(t, err)
+		var appErr ungerr.AppError
+		require.ErrorAs(t, err, &appErr)
+		assert.Equal(t, http.StatusBadRequest, appErr.HttpStatus())
+	})
+
+	t.Run("rejects a non-chooser with 403", func(t *testing.T) {
+		svc, decisionSessionRepo, sessionParticipantRepo, _, groupMemberRepo, groupRepo, _, _, _, _ := newTestDecisionSessionService(t)
+		expectParticipant(sessionParticipantRepo, otherProfileID)
+		decisionSessionRepo.EXPECT().FindFirst(mock.Anything, mock.Anything).Return(votingRoundRobinSession(), nil)
+		expectChooser(groupMemberRepo, groupRepo)
+
+		_, err := svc.Select(context.Background(), otherProfileID, sessionID, dto.CastVoteRequest{ContentID: candidateOne})
+
+		require.Error(t, err)
+		var appErr ungerr.AppError
+		require.ErrorAs(t, err, &appErr)
+		assert.Equal(t, http.StatusForbidden, appErr.HttpStatus())
+	})
+
+	t.Run("accepts the correct chooser's pick", func(t *testing.T) {
+		svc, decisionSessionRepo, sessionParticipantRepo, _, groupMemberRepo, groupRepo, _, _, sessionVoteRepo, _ := newTestDecisionSessionService(t)
+		expectParticipant(sessionParticipantRepo, chooserProfileID)
+		decisionSessionRepo.EXPECT().FindFirst(mock.Anything, mock.Anything).Return(votingRoundRobinSession(), nil)
+		expectChooser(groupMemberRepo, groupRepo)
+
+		// upsertVote's lookup (empty → Insert), then selectionTally's
+		// read-back of the persisted vote — two distinct FindFirst calls on
+		// identical args, sequenced with .Once() since testify's mock
+		// otherwise always resolves to the first registered match.
+		sessionVoteFindFirstMatcher := mock.MatchedBy(func(spec crud.Specification[entity.SessionVote]) bool {
+			return spec.Model.SessionID == sessionID && spec.Model.ProfileID == chooserProfileID
+		})
+		sessionVoteRepo.EXPECT().
+			FindFirst(mock.Anything, sessionVoteFindFirstMatcher).
+			Return(entity.SessionVote{}, nil).
+			Once()
+		sessionVoteRepo.EXPECT().
+			Insert(mock.Anything, entity.SessionVote{SessionID: sessionID, ProfileID: chooserProfileID, ContentID: candidateOne}).
+			Return(entity.SessionVote{}, nil)
+		sessionVoteRepo.EXPECT().
+			FindFirst(mock.Anything, sessionVoteFindFirstMatcher).
+			Return(entity.SessionVote{BaseEntity: crud.BaseEntity{ID: uuid.New()}, SessionID: sessionID, ProfileID: chooserProfileID, ContentID: candidateOne}, nil).
+			Once()
+
+		// selectionTally re-derives the chooser via the same (unlimited)
+		// expectChooser expectations registered above.
+
+		resp, err := svc.Select(context.Background(), chooserProfileID, sessionID, dto.CastVoteRequest{ContentID: candidateOne})
+
+		require.NoError(t, err)
+		tally, ok := resp.Tally.(dto.SelectionTally)
+		require.True(t, ok)
+		require.NotNil(t, tally.SelectedContentID)
+		assert.Equal(t, candidateOne, *tally.SelectedContentID)
+	})
 }

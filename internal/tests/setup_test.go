@@ -96,6 +96,8 @@ func registerTestRoutes(r *gin.Engine, db *gorm.DB) {
 		crud.NewRepository[entity.Group](db),
 		crud.NewRepository[entity.WatchlistItem](db),
 		crud.NewRepository[entity.SessionPrioritySnapshot](db),
+		crud.NewRepository[entity.SessionVote](db),
+		crud.NewRepository[entity.SessionRanking](db),
 	)
 
 	// Routes
@@ -271,6 +273,60 @@ func registerTestRoutes(r *gin.Engine, db *gorm.DB) {
 			return
 		}
 		resp, err := decisionSessionSvc.Get(c.Request.Context(), getTestProfileID(c), sessionID)
+		if err != nil {
+			_ = c.Error(err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"data": resp})
+	})
+	api.POST("/sessions/:sessionID/votes", func(c *gin.Context) {
+		sessionID, err := uuid.Parse(c.Param("sessionID"))
+		if err != nil {
+			_ = c.Error(ungerr.BadRequestError("invalid sessionID"))
+			return
+		}
+		var req dto.CastVoteRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			_ = c.Error(ungerr.Wrap(err, "validation"))
+			return
+		}
+		resp, err := decisionSessionSvc.CastVote(c.Request.Context(), getTestProfileID(c), sessionID, req)
+		if err != nil {
+			_ = c.Error(err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"data": resp})
+	})
+	api.POST("/sessions/:sessionID/rankings", func(c *gin.Context) {
+		sessionID, err := uuid.Parse(c.Param("sessionID"))
+		if err != nil {
+			_ = c.Error(ungerr.BadRequestError("invalid sessionID"))
+			return
+		}
+		var req dto.SubmitRankingRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			_ = c.Error(ungerr.Wrap(err, "validation"))
+			return
+		}
+		resp, err := decisionSessionSvc.SubmitRanking(c.Request.Context(), getTestProfileID(c), sessionID, req)
+		if err != nil {
+			_ = c.Error(err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"data": resp})
+	})
+	api.POST("/sessions/:sessionID/select", func(c *gin.Context) {
+		sessionID, err := uuid.Parse(c.Param("sessionID"))
+		if err != nil {
+			_ = c.Error(ungerr.BadRequestError("invalid sessionID"))
+			return
+		}
+		var req dto.CastVoteRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			_ = c.Error(ungerr.Wrap(err, "validation"))
+			return
+		}
+		resp, err := decisionSessionSvc.Select(c.Request.Context(), getTestProfileID(c), sessionID, req)
 		if err != nil {
 			_ = c.Error(err)
 			return

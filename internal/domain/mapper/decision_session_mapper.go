@@ -29,7 +29,7 @@ func MethodToAPI(dbMethod string) string {
 // SessionToResponse is pure/stateless like every other mapper — the caller
 // computes currentChooserProfileID (it needs a DB round-trip) and passes it
 // in rather than this function deriving it.
-func SessionToResponse(session entity.DecisionSession, currentChooserProfileID *uuid.UUID) dto.SessionResponse {
+func SessionToResponse(session entity.DecisionSession, currentChooserProfileID *uuid.UUID, tally any) dto.SessionResponse {
 	return dto.SessionResponse{
 		ID:      session.ID,
 		GroupID: session.GroupID,
@@ -42,7 +42,7 @@ func SessionToResponse(session entity.DecisionSession, currentChooserProfileID *
 			return ContentToResponse(c.Content)
 		}),
 		CurrentChooserProfileID: currentChooserProfileID,
-		Tally:                   nil,
+		Tally:                   tally,
 		WinnerContentID:         session.WinnerContentID,
 		FinalizedAt:             session.FinalizedAt,
 	}

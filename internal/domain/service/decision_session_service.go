@@ -26,6 +26,12 @@ type DecisionSessionService interface {
 	// row for a candidate gets no snapshot row — the Priority-Based
 	// resolver (Task 4) treats a missing row as weight 0.
 	CapturePrioritySnapshots(ctx context.Context, sessionID uuid.UUID, participantIDs, candidateIDs []uuid.UUID) error
+	CastVote(ctx context.Context, profileID, sessionID uuid.UUID, request dto.CastVoteRequest) (dto.TallyResponse, error)
+	SubmitRanking(ctx context.Context, profileID, sessionID uuid.UUID, request dto.SubmitRankingRequest) (dto.TallyResponse, error)
+	// Select is Round Robin's chooser pick — reuses CastVoteRequest's
+	// {contentId} shape and the session_votes table (see this file's
+	// upsertVote doc comment).
+	Select(ctx context.Context, profileID, sessionID uuid.UUID, request dto.CastVoteRequest) (dto.TallyResponse, error)
 }
 
 type decisionSessionServiceImpl struct {
@@ -37,6 +43,8 @@ type decisionSessionServiceImpl struct {
 	groupRepo                   crud.Repository[entity.Group]
 	watchlistRepo               crud.Repository[entity.WatchlistItem]
 	sessionPrioritySnapshotRepo crud.Repository[entity.SessionPrioritySnapshot]
+	sessionVoteRepo             crud.Repository[entity.SessionVote]
+	sessionRankingRepo          crud.Repository[entity.SessionRanking]
 }
 
 func NewDecisionSessionService(
@@ -48,6 +56,8 @@ func NewDecisionSessionService(
 	groupRepo crud.Repository[entity.Group],
 	watchlistRepo crud.Repository[entity.WatchlistItem],
 	sessionPrioritySnapshotRepo crud.Repository[entity.SessionPrioritySnapshot],
+	sessionVoteRepo crud.Repository[entity.SessionVote],
+	sessionRankingRepo crud.Repository[entity.SessionRanking],
 ) DecisionSessionService {
 	return &decisionSessionServiceImpl{
 		transactor,
@@ -58,6 +68,8 @@ func NewDecisionSessionService(
 		groupRepo,
 		watchlistRepo,
 		sessionPrioritySnapshotRepo,
+		sessionVoteRepo,
+		sessionRankingRepo,
 	}
 }
 
@@ -222,14 +234,34 @@ func (dss *decisionSessionServiceImpl) Get(ctx context.Context, profileID, sessi
 	}
 
 	var chooser *uuid.UUID
-	if session.Method == "round_robin" {
+	var tally any
+
+	switch session.Method {
+	case "majority":
+		t, err := dss.majorityTally(ctx, session.ID)
+		if err != nil {
+			return dto.SessionResponse{}, err
+		}
+		tally = t
+	case "ranked":
+		t, err := dss.rankedTally(ctx, session)
+		if err != nil {
+			return dto.SessionResponse{}, err
+		}
+		tally = t
+	case "round_robin":
 		chooser, err = dss.currentChooser(ctx, session)
 		if err != nil {
 			return dto.SessionResponse{}, err
 		}
+		t, err := dss.selectionTally(ctx, session)
+		if err != nil {
+			return dto.SessionResponse{}, err
+		}
+		tally = t
 	}
 
-	return mapper.SessionToResponse(session, chooser), nil
+	return mapper.SessionToResponse(session, chooser, tally), nil
 }
 
 // currentChooser is Round Robin only — Random has no chooser concept and
@@ -315,4 +347,244 @@ func (dss *decisionSessionServiceImpl) CapturePrioritySnapshots(ctx context.Cont
 
 	_, err := dss.sessionPrioritySnapshotRepo.InsertMany(ctx, snapshots)
 	return err
+}
+
+// loadVotingSession is the shared guard for every mutating input endpoint:
+// participant check (404, non-disclosure) → session load with the given
+// preloads → status check (409 if not "voting"). Method-specific checks
+// (right endpoint for this session's method, payload validity) happen in
+// each caller after this returns.
+func (dss *decisionSessionServiceImpl) loadVotingSession(ctx context.Context, sessionID, profileID uuid.UUID, preloads []string) (entity.DecisionSession, error) {
+	participantSpec := crud.Specification[entity.SessionParticipant]{}
+	participantSpec.Model.SessionID = sessionID
+	participantSpec.Model.ProfileID = profileID
+	participation, err := dss.sessionParticipantRepo.FindFirst(ctx, participantSpec)
+	if err != nil {
+		return entity.DecisionSession{}, err
+	}
+	if participation.IsZero() {
+		return entity.DecisionSession{}, ungerr.NotFoundError(fmt.Sprintf("session %s is not found", sessionID))
+	}
+
+	spec := crud.Specification[entity.DecisionSession]{PreloadRelations: preloads}
+	spec.Model.ID = sessionID
+	session, err := dss.decisionSessionRepo.FindFirst(ctx, spec)
+	if err != nil {
+		return entity.DecisionSession{}, err
+	}
+	if session.ID == uuid.Nil {
+		return entity.DecisionSession{}, ungerr.NotFoundError(fmt.Sprintf("session %s is not found", sessionID))
+	}
+	if session.Status != "voting" {
+		return entity.DecisionSession{}, ungerr.ConflictError(fmt.Sprintf("session %s is not open for voting", sessionID))
+	}
+
+	return session, nil
+}
+
+func containsCandidate(candidates []entity.SessionCandidate, contentID uuid.UUID) bool {
+	for _, c := range candidates {
+		if c.ContentID == contentID {
+			return true
+		}
+	}
+	return false
+}
+
+// upsertVote backs both CastVote (Majority) and Select (Round Robin) — one
+// row per (session_id, profile_id), replaced on resubmit.
+func (dss *decisionSessionServiceImpl) upsertVote(ctx context.Context, sessionID, profileID, contentID uuid.UUID) error {
+	spec := crud.Specification[entity.SessionVote]{}
+	spec.Model.SessionID = sessionID
+	spec.Model.ProfileID = profileID
+	existing, err := dss.sessionVoteRepo.FindFirst(ctx, spec)
+	if err != nil {
+		return err
+	}
+
+	if existing.IsZero() {
+		_, err = dss.sessionVoteRepo.Insert(ctx, entity.SessionVote{SessionID: sessionID, ProfileID: profileID, ContentID: contentID})
+		return err
+	}
+
+	existing.ContentID = contentID
+	_, err = dss.sessionVoteRepo.Update(ctx, existing)
+	return err
+}
+
+func (dss *decisionSessionServiceImpl) majorityTally(ctx context.Context, sessionID uuid.UUID) (dto.CountsTally, error) {
+	spec := crud.Specification[entity.SessionVote]{}
+	spec.Model.SessionID = sessionID
+	votes, err := dss.sessionVoteRepo.FindAll(ctx, spec)
+	if err != nil {
+		return dto.CountsTally{}, err
+	}
+
+	counts := make(map[string]int)
+	for _, v := range votes {
+		counts[v.ContentID.String()]++
+	}
+	return dto.CountsTally{Counts: counts}, nil
+}
+
+// rankedTally is a raw first-preference snapshot, not an IRV simulation —
+// see this task's "Design decisions" note on why round/eliminations are
+// finalize-only (Task 4).
+func (dss *decisionSessionServiceImpl) rankedTally(ctx context.Context, session entity.DecisionSession) (dto.RankedTally, error) {
+	spec := crud.Specification[entity.SessionRanking]{}
+	spec.Model.SessionID = session.ID
+	rankings, err := dss.sessionRankingRepo.FindAll(ctx, spec)
+	if err != nil {
+		return dto.RankedTally{}, err
+	}
+
+	counts := make(map[string]int)
+	for _, r := range rankings {
+		if r.Rank == 1 {
+			counts[r.ContentID.String()]++
+		}
+	}
+
+	activeCandidateIDs := make([]uuid.UUID, len(session.Candidates))
+	for i, c := range session.Candidates {
+		activeCandidateIDs[i] = c.ContentID
+	}
+
+	return dto.RankedTally{
+		Round:                  1,
+		ActiveCandidateIDs:     activeCandidateIDs,
+		EliminatedCandidateIDs: []uuid.UUID{},
+		Counts:                 counts,
+	}, nil
+}
+
+func (dss *decisionSessionServiceImpl) selectionTally(ctx context.Context, session entity.DecisionSession) (dto.SelectionTally, error) {
+	chooser, err := dss.currentChooser(ctx, session)
+	if err != nil {
+		return dto.SelectionTally{}, err
+	}
+	if chooser == nil {
+		return dto.SelectionTally{}, nil
+	}
+
+	spec := crud.Specification[entity.SessionVote]{}
+	spec.Model.SessionID = session.ID
+	spec.Model.ProfileID = *chooser
+	vote, err := dss.sessionVoteRepo.FindFirst(ctx, spec)
+	if err != nil {
+		return dto.SelectionTally{}, err
+	}
+	if vote.IsZero() {
+		return dto.SelectionTally{}, nil
+	}
+	return dto.SelectionTally{SelectedContentID: &vote.ContentID}, nil
+}
+
+func (dss *decisionSessionServiceImpl) CastVote(ctx context.Context, profileID, sessionID uuid.UUID, request dto.CastVoteRequest) (dto.TallyResponse, error) {
+	ctx, span := otel.Tracer.Start(ctx, "DecisionSessionService.CastVote")
+	defer span.End()
+
+	session, err := dss.loadVotingSession(ctx, sessionID, profileID, []string{"Candidates"})
+	if err != nil {
+		return dto.TallyResponse{}, err
+	}
+	if session.Method != "majority" {
+		return dto.TallyResponse{}, ungerr.BadRequestError(fmt.Sprintf("session %s is not a majority session", sessionID))
+	}
+	if !containsCandidate(session.Candidates, request.ContentID) {
+		return dto.TallyResponse{}, ungerr.BadRequestError(fmt.Sprintf("content %s is not a session candidate", request.ContentID))
+	}
+	if err := dss.upsertVote(ctx, sessionID, profileID, request.ContentID); err != nil {
+		return dto.TallyResponse{}, err
+	}
+
+	tally, err := dss.majorityTally(ctx, sessionID)
+	if err != nil {
+		return dto.TallyResponse{}, err
+	}
+	return dto.TallyResponse{Tally: tally}, nil
+}
+
+func (dss *decisionSessionServiceImpl) SubmitRanking(ctx context.Context, profileID, sessionID uuid.UUID, request dto.SubmitRankingRequest) (dto.TallyResponse, error) {
+	ctx, span := otel.Tracer.Start(ctx, "DecisionSessionService.SubmitRanking")
+	defer span.End()
+
+	session, err := dss.loadVotingSession(ctx, sessionID, profileID, []string{"Candidates"})
+	if err != nil {
+		return dto.TallyResponse{}, err
+	}
+	if session.Method != "ranked" {
+		return dto.TallyResponse{}, ungerr.BadRequestError(fmt.Sprintf("session %s is not a ranked session", sessionID))
+	}
+
+	seen := make(map[uuid.UUID]struct{}, len(request.Ranking))
+	for _, cid := range request.Ranking {
+		if _, dup := seen[cid]; dup {
+			return dto.TallyResponse{}, ungerr.BadRequestError(fmt.Sprintf("ranking has duplicate content %s", cid))
+		}
+		seen[cid] = struct{}{}
+		if !containsCandidate(session.Candidates, cid) {
+			return dto.TallyResponse{}, ungerr.BadRequestError(fmt.Sprintf("content %s is not a session candidate", cid))
+		}
+	}
+
+	existingSpec := crud.Specification[entity.SessionRanking]{}
+	existingSpec.Model.SessionID = sessionID
+	existingSpec.Model.ProfileID = profileID
+	existing, err := dss.sessionRankingRepo.FindAll(ctx, existingSpec)
+	if err != nil {
+		return dto.TallyResponse{}, err
+	}
+	if len(existing) > 0 {
+		if err := dss.sessionRankingRepo.DeleteMany(ctx, existing); err != nil {
+			return dto.TallyResponse{}, err
+		}
+	}
+
+	newRankings := make([]entity.SessionRanking, len(request.Ranking))
+	for i, cid := range request.Ranking {
+		newRankings[i] = entity.SessionRanking{SessionID: sessionID, ProfileID: profileID, ContentID: cid, Rank: i + 1}
+	}
+	if _, err := dss.sessionRankingRepo.InsertMany(ctx, newRankings); err != nil {
+		return dto.TallyResponse{}, err
+	}
+
+	tally, err := dss.rankedTally(ctx, session)
+	if err != nil {
+		return dto.TallyResponse{}, err
+	}
+	return dto.TallyResponse{Tally: tally}, nil
+}
+
+func (dss *decisionSessionServiceImpl) Select(ctx context.Context, profileID, sessionID uuid.UUID, request dto.CastVoteRequest) (dto.TallyResponse, error) {
+	ctx, span := otel.Tracer.Start(ctx, "DecisionSessionService.Select")
+	defer span.End()
+
+	session, err := dss.loadVotingSession(ctx, sessionID, profileID, []string{"Candidates", "Participants"})
+	if err != nil {
+		return dto.TallyResponse{}, err
+	}
+	if session.Method != "round_robin" {
+		return dto.TallyResponse{}, ungerr.BadRequestError(fmt.Sprintf("session %s is not a round robin session", sessionID))
+	}
+
+	chooser, err := dss.currentChooser(ctx, session)
+	if err != nil {
+		return dto.TallyResponse{}, err
+	}
+	if chooser == nil || *chooser != profileID {
+		return dto.TallyResponse{}, ungerr.ForbiddenError(fmt.Sprintf("profile %s is not the current chooser for session %s", profileID, sessionID))
+	}
+	if !containsCandidate(session.Candidates, request.ContentID) {
+		return dto.TallyResponse{}, ungerr.BadRequestError(fmt.Sprintf("content %s is not a session candidate", request.ContentID))
+	}
+	if err := dss.upsertVote(ctx, sessionID, profileID, request.ContentID); err != nil {
+		return dto.TallyResponse{}, err
+	}
+
+	tally, err := dss.selectionTally(ctx, session)
+	if err != nil {
+		return dto.TallyResponse{}, err
+	}
+	return dto.TallyResponse{Tally: tally}, nil
 }
