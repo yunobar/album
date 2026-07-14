@@ -528,24 +528,31 @@ func (dss *decisionSessionServiceImpl) SubmitRanking(ctx context.Context, profil
 		}
 	}
 
-	existingSpec := crud.Specification[entity.SessionRanking]{}
-	existingSpec.Model.SessionID = sessionID
-	existingSpec.Model.ProfileID = profileID
-	existing, err := dss.sessionRankingRepo.FindAll(ctx, existingSpec)
-	if err != nil {
-		return dto.TallyResponse{}, err
-	}
-	if len(existing) > 0 {
-		if err := dss.sessionRankingRepo.DeleteMany(ctx, existing); err != nil {
-			return dto.TallyResponse{}, err
+	// Delete-then-reinsert must be atomic: if InsertMany failed after a
+	// successful DeleteMany with no transaction, the ballot would be wiped
+	// to zero rows instead of either the old or new ballot surviving intact.
+	err = dss.transactor.WithinTransaction(ctx, func(ctx context.Context) error {
+		existingSpec := crud.Specification[entity.SessionRanking]{}
+		existingSpec.Model.SessionID = sessionID
+		existingSpec.Model.ProfileID = profileID
+		existing, err := dss.sessionRankingRepo.FindAll(ctx, existingSpec)
+		if err != nil {
+			return err
 		}
-	}
+		if len(existing) > 0 {
+			if err := dss.sessionRankingRepo.DeleteMany(ctx, existing); err != nil {
+				return err
+			}
+		}
 
-	newRankings := make([]entity.SessionRanking, len(request.Ranking))
-	for i, cid := range request.Ranking {
-		newRankings[i] = entity.SessionRanking{SessionID: sessionID, ProfileID: profileID, ContentID: cid, Rank: i + 1}
-	}
-	if _, err := dss.sessionRankingRepo.InsertMany(ctx, newRankings); err != nil {
+		newRankings := make([]entity.SessionRanking, len(request.Ranking))
+		for i, cid := range request.Ranking {
+			newRankings[i] = entity.SessionRanking{SessionID: sessionID, ProfileID: profileID, ContentID: cid, Rank: i + 1}
+		}
+		_, err = dss.sessionRankingRepo.InsertMany(ctx, newRankings)
+		return err
+	})
+	if err != nil {
 		return dto.TallyResponse{}, err
 	}
 
