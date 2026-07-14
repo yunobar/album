@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/itsLeonB/go-crud"
@@ -572,5 +573,188 @@ func TestDecisionSessionService_Select(t *testing.T) {
 		require.True(t, ok)
 		require.NotNil(t, tally.SelectedContentID)
 		assert.Equal(t, candidateOne, *tally.SelectedContentID)
+	})
+}
+
+func TestDecisionSessionService_Finalize(t *testing.T) {
+	sessionID := uuid.New()
+	groupID := uuid.New()
+	profileID := uuid.New()
+	candidateOne := uuid.New()
+	candidateTwo := uuid.New()
+
+	votingMajoritySession := func() entity.DecisionSession {
+		return entity.DecisionSession{
+			ID:         sessionID,
+			GroupID:    groupID,
+			Method:     "majority",
+			Status:     "voting",
+			RandomSeed: 1,
+			Candidates: []entity.SessionCandidate{{ContentID: candidateOne}, {ContentID: candidateTwo}},
+		}
+	}
+
+	expectParticipant := func(participantRepo *mocks.MockRepository[entity.SessionParticipant]) {
+		participantRepo.EXPECT().
+			FindFirst(mock.Anything, mock.MatchedBy(func(spec crud.Specification[entity.SessionParticipant]) bool {
+				return spec.Model.SessionID == sessionID && spec.Model.ProfileID == profileID
+			})).
+			Return(entity.SessionParticipant{BaseEntity: crud.BaseEntity{ID: uuid.New()}, SessionID: sessionID, ProfileID: profileID}, nil)
+	}
+
+	t.Run("rejects a non-participant with 404", func(t *testing.T) {
+		svc, _, sessionParticipantRepo, _, _, _, _, _, _, _ := newTestDecisionSessionService(t)
+		sessionParticipantRepo.EXPECT().
+			FindFirst(mock.Anything, mock.Anything).
+			Return(entity.SessionParticipant{}, nil)
+
+		_, err := svc.Finalize(context.Background(), profileID, sessionID)
+
+		require.Error(t, err)
+		var appErr ungerr.AppError
+		require.ErrorAs(t, err, &appErr)
+		assert.Equal(t, http.StatusNotFound, appErr.HttpStatus())
+	})
+
+	t.Run("rejects a session that isn't open for voting with 409", func(t *testing.T) {
+		svc, decisionSessionRepo, sessionParticipantRepo, _, _, _, _, _, _, _ := newTestDecisionSessionService(t)
+		expectParticipant(sessionParticipantRepo)
+
+		session := votingMajoritySession()
+		session.Status = "completed"
+		decisionSessionRepo.EXPECT().FindFirst(mock.Anything, mock.Anything).Return(session, nil)
+
+		_, err := svc.Finalize(context.Background(), profileID, sessionID)
+
+		require.Error(t, err)
+		var appErr ungerr.AppError
+		require.ErrorAs(t, err, &appErr)
+		assert.Equal(t, http.StatusConflict, appErr.HttpStatus())
+	})
+
+	t.Run("majority: dispatches to sessionVoteRepo (not sessionRankingRepo), sets status/winner/finalizedAt, never touches groupRepo", func(t *testing.T) {
+		svc, decisionSessionRepo, sessionParticipantRepo, _, _, groupRepo, _, _, sessionVoteRepo, sessionRankingRepo := newTestDecisionSessionService(t)
+		expectParticipant(sessionParticipantRepo)
+
+		votingSession := votingMajoritySession()
+		decisionSessionRepo.EXPECT().FindFirst(mock.Anything, mock.Anything).Return(votingSession, nil).Once()
+
+		sessionVoteRepo.EXPECT().
+			FindAll(mock.Anything, mock.MatchedBy(func(spec crud.Specification[entity.SessionVote]) bool {
+				return spec.Model.SessionID == sessionID
+			})).
+			Return([]entity.SessionVote{
+				{SessionID: sessionID, ProfileID: uuid.New(), ContentID: candidateOne},
+				{SessionID: sessionID, ProfileID: uuid.New(), ContentID: candidateOne},
+				{SessionID: sessionID, ProfileID: uuid.New(), ContentID: candidateTwo},
+			}, nil)
+
+		decisionSessionRepo.EXPECT().
+			Update(mock.Anything, mock.MatchedBy(func(s entity.DecisionSession) bool {
+				return s.Status == "completed" &&
+					s.WinnerContentID != nil && *s.WinnerContentID == candidateOne &&
+					s.FinalizedAt != nil
+			})).
+			Return(entity.DecisionSession{}, nil)
+
+		completedSession := votingSession
+		completedSession.Status = "completed"
+		winner := candidateOne
+		completedSession.WinnerContentID = &winner
+		now := time.Now()
+		completedSession.FinalizedAt = &now
+		decisionSessionRepo.EXPECT().FindFirst(mock.Anything, mock.Anything).Return(completedSession, nil).Once()
+
+		resp, err := svc.Finalize(context.Background(), profileID, sessionID)
+
+		require.NoError(t, err)
+		assert.Equal(t, "completed", resp.Status)
+		require.NotNil(t, resp.WinnerContentID)
+		assert.Equal(t, candidateOne, *resp.WinnerContentID)
+		assert.NotNil(t, resp.FinalizedAt)
+
+		sessionRankingRepo.AssertNotCalled(t, "FindAll", mock.Anything, mock.Anything)
+		groupRepo.AssertNotCalled(t, "Update", mock.Anything, mock.Anything)
+	})
+
+	t.Run("ranked: dispatches to sessionRankingRepo, not sessionVoteRepo", func(t *testing.T) {
+		svc, decisionSessionRepo, sessionParticipantRepo, _, _, _, _, _, sessionVoteRepo, sessionRankingRepo := newTestDecisionSessionService(t)
+		expectParticipant(sessionParticipantRepo)
+
+		session := votingMajoritySession()
+		session.Method = "ranked"
+		decisionSessionRepo.EXPECT().FindFirst(mock.Anything, mock.Anything).Return(session, nil).Once()
+
+		sessionRankingRepo.EXPECT().
+			FindAll(mock.Anything, mock.MatchedBy(func(spec crud.Specification[entity.SessionRanking]) bool {
+				return spec.Model.SessionID == sessionID
+			})).
+			Return([]entity.SessionRanking{
+				{SessionID: sessionID, ProfileID: uuid.New(), ContentID: candidateOne, Rank: 1},
+			}, nil)
+
+		decisionSessionRepo.EXPECT().
+			Update(mock.Anything, mock.MatchedBy(func(s entity.DecisionSession) bool {
+				return s.Status == "completed" && s.WinnerContentID != nil
+			})).
+			Return(entity.DecisionSession{}, nil)
+
+		completedSession := session
+		completedSession.Status = "completed"
+		winner := candidateOne
+		completedSession.WinnerContentID = &winner
+		decisionSessionRepo.EXPECT().FindFirst(mock.Anything, mock.Anything).Return(completedSession, nil).Once()
+
+		_, err := svc.Finalize(context.Background(), profileID, sessionID)
+
+		require.NoError(t, err)
+		sessionVoteRepo.AssertNotCalled(t, "FindAll", mock.Anything, mock.Anything)
+	})
+
+	t.Run("round_robin: advances groups.round_robin_pointer", func(t *testing.T) {
+		svc, decisionSessionRepo, sessionParticipantRepo, _, groupMemberRepo, groupRepo, _, _, sessionVoteRepo, _ := newTestDecisionSessionService(t)
+		expectParticipant(sessionParticipantRepo)
+
+		session := votingMajoritySession()
+		session.Method = "round_robin"
+		session.Participants = []entity.SessionParticipant{{SessionID: sessionID, ProfileID: profileID}}
+		decisionSessionRepo.EXPECT().FindFirst(mock.Anything, mock.Anything).Return(session, nil).Once()
+
+		groupMemberRepo.EXPECT().
+			FindAll(mock.Anything, mock.MatchedBy(func(spec crud.Specification[entity.GroupMember]) bool {
+				return spec.Model.GroupID == groupID
+			})).
+			Return([]entity.GroupMember{{ProfileID: profileID}}, nil)
+		groupRepo.EXPECT().
+			FindFirst(mock.Anything, mock.Anything).
+			Return(entity.Group{BaseEntity: crud.BaseEntity{ID: groupID}, RoundRobinPointer: 0}, nil)
+
+		sessionVoteRepo.EXPECT().
+			FindFirst(mock.Anything, mock.MatchedBy(func(spec crud.Specification[entity.SessionVote]) bool {
+				return spec.Model.SessionID == sessionID && spec.Model.ProfileID == profileID
+			})).
+			Return(entity.SessionVote{BaseEntity: crud.BaseEntity{ID: uuid.New()}, SessionID: sessionID, ProfileID: profileID, ContentID: candidateOne}, nil)
+
+		decisionSessionRepo.EXPECT().
+			Update(mock.Anything, mock.MatchedBy(func(s entity.DecisionSession) bool {
+				return s.Status == "completed"
+			})).
+			Return(entity.DecisionSession{}, nil)
+
+		groupRepo.EXPECT().
+			Update(mock.Anything, mock.MatchedBy(func(g entity.Group) bool {
+				return g.RoundRobinPointer == 1
+			})).
+			Return(entity.Group{}, nil)
+
+		completedSession := session
+		completedSession.Status = "completed"
+		winner := candidateOne
+		completedSession.WinnerContentID = &winner
+		decisionSessionRepo.EXPECT().FindFirst(mock.Anything, mock.Anything).Return(completedSession, nil).Once()
+
+		_, err := svc.Finalize(context.Background(), profileID, sessionID)
+
+		require.NoError(t, err)
 	})
 }

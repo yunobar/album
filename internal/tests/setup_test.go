@@ -333,6 +333,19 @@ func registerTestRoutes(r *gin.Engine, db *gorm.DB) {
 		}
 		c.JSON(http.StatusOK, gin.H{"data": resp})
 	})
+	api.POST("/sessions/:sessionID/finalize", func(c *gin.Context) {
+		sessionID, err := uuid.Parse(c.Param("sessionID"))
+		if err != nil {
+			_ = c.Error(ungerr.BadRequestError("invalid sessionID"))
+			return
+		}
+		resp, err := decisionSessionSvc.Finalize(c.Request.Context(), getTestProfileID(c), sessionID)
+		if err != nil {
+			_ = c.Error(err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"data": resp})
+	})
 }
 
 func getTestProfileID(c *gin.Context) uuid.UUID {

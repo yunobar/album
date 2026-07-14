@@ -565,6 +565,255 @@ func TestDecisionSessionSelect(t *testing.T) {
 	})
 }
 
+// postFinalize POSTs /finalize for sessionID as callerProfileID (default
+// test caller when empty) and asserts wantStatus. On a 2xx status it decodes
+// and returns the response body's data.
+func postFinalize(t *testing.T, sessionID uuid.UUID, callerProfileID string, wantStatus int) dto.SessionResponse {
+	t.Helper()
+
+	w := httptest.NewRecorder()
+	httpReq, _ := http.NewRequest(http.MethodPost, "/api/v1/sessions/"+sessionID.String()+"/finalize", nil)
+	if callerProfileID != "" {
+		httpReq.Header.Set(testProfileIDHeader, callerProfileID)
+	}
+	testRouter.ServeHTTP(w, httpReq)
+	require.Equal(t, wantStatus, w.Code, w.Body.String())
+
+	var resp struct {
+		Data dto.SessionResponse `json:"data"`
+	}
+	if w.Code < 300 {
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	}
+	return resp.Data
+}
+
+// seedWatchlistItemWithPriority is seedActiveWatchlistItem with an explicit
+// priority, for tests that need to distinguish Priority-Based weights.
+func seedWatchlistItemWithPriority(t *testing.T, profileID, contentID uuid.UUID, priority string) {
+	t.Helper()
+	require.NoError(t, testDB.Create(&entity.WatchlistItem{
+		ProfileID: profileID,
+		ContentID: contentID,
+		Priority:  priority,
+		Status:    "active",
+	}).Error)
+}
+
+func TestDecisionSessionFinalize(t *testing.T) {
+	testhelpers.RequireTestDB(t, testDB)
+
+	t.Run("immutability: finalize locks in the winner; a later mutation 409s and the winner is unchanged", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		bob := seedTestProfile(t, "Bob")
+		group := seedTestGroup(t, nil, testProfileID, bob.ID)
+		content1 := seedTestContent(t)
+		content2 := seedTestContent(t)
+		seedActiveWatchlistItem(t, testProfileID, content1.ID)
+		seedActiveWatchlistItem(t, bob.ID, content2.ID)
+
+		session := postCreateSession(t, group.ID, dto.CreateSessionRequest{
+			Method:              "majority",
+			ParticipantIDs:      []uuid.UUID{testProfileID, bob.ID},
+			CandidateContentIDs: []uuid.UUID{content1.ID, content2.ID},
+		}, http.StatusCreated)
+
+		// Two participants vote for different candidates so the outcome
+		// isn't trivially predetermined by a single vote.
+		postSessionAction(t, session.ID, "votes", dto.CastVoteRequest{ContentID: content1.ID}, "", http.StatusOK)
+		postSessionAction(t, session.ID, "votes", dto.CastVoteRequest{ContentID: content2.ID}, bob.ID.String(), http.StatusOK)
+		postSessionAction(t, session.ID, "votes", dto.CastVoteRequest{ContentID: content1.ID}, bob.ID.String(), http.StatusOK)
+
+		finalized := postFinalize(t, session.ID, "", http.StatusOK)
+		assert.Equal(t, "completed", finalized.Status)
+		require.NotNil(t, finalized.WinnerContentID)
+		assert.Equal(t, content1.ID, *finalized.WinnerContentID)
+		require.NotNil(t, finalized.FinalizedAt)
+
+		// The Participants/Candidates has-many association rows must
+		// survive Update's db.Save call untouched — same count, same IDs —
+		// this is the GORM Update-with-associations invariant the brief
+		// asked to be verified against real data, not just read and
+		// trusted.
+		require.Len(t, finalized.Participants, 2)
+		require.Len(t, finalized.Candidates, 2)
+
+		// A follow-up mutation is rejected — the session is no longer open
+		// for voting.
+		postSessionAction(t, session.ID, "votes", dto.CastVoteRequest{ContentID: content2.ID}, "", http.StatusConflict)
+
+		// The winner is unchanged.
+		getResp := getSession(t, session.ID, "", http.StatusOK)
+		require.NotNil(t, getResp.WinnerContentID)
+		assert.Equal(t, content1.ID, *getResp.WinnerContentID)
+		assert.Equal(t, "completed", getResp.Status)
+		require.Len(t, getResp.Participants, 2)
+		require.Len(t, getResp.Candidates, 2)
+
+		// Belt-and-suspenders: confirm the association rows in the DB
+		// weren't duplicated or orphaned by Update's db.Save call on the
+		// preloaded session.
+		var participantCount, candidateCount int64
+		require.NoError(t, testDB.Model(&entity.SessionParticipant{}).Where("session_id = ?", session.ID).Count(&participantCount).Error)
+		require.NoError(t, testDB.Model(&entity.SessionCandidate{}).Where("session_id = ?", session.ID).Count(&candidateCount).Error)
+		assert.EqualValues(t, 2, participantCount)
+		assert.EqualValues(t, 2, candidateCount)
+	})
+
+	t.Run("snapshot: finalize uses the priority frozen at session creation, not a later edit", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		bob := seedTestProfile(t, "Bob")
+		group := seedTestGroup(t, nil, testProfileID, bob.ID)
+		candidateA := seedTestContent(t)
+		candidateB := seedTestContent(t)
+
+		// testProfileID's priority for candidateA starts "low" (weight 1);
+		// bob's priority for candidateB is "medium" (weight 2) — B wins
+		// under the frozen snapshot. If the resolver read live
+		// watchlist_items instead of the snapshot, editing A to "must"
+		// (weight 5) after creation would flip the winner to A.
+		seedWatchlistItemWithPriority(t, testProfileID, candidateA.ID, "low")
+		seedWatchlistItemWithPriority(t, bob.ID, candidateB.ID, "medium")
+
+		session := postCreateSession(t, group.ID, dto.CreateSessionRequest{
+			Method:              "priority",
+			ParticipantIDs:      []uuid.UUID{testProfileID, bob.ID},
+			CandidateContentIDs: []uuid.UUID{candidateA.ID, candidateB.ID},
+		}, http.StatusCreated)
+
+		// Bypass the watchlist endpoint entirely — edit the underlying row
+		// directly, after the session (and its frozen snapshot) already
+		// exist.
+		require.NoError(t, testDB.Model(&entity.WatchlistItem{}).
+			Where("profile_id = ? AND content_id = ?", testProfileID, candidateA.ID).
+			Update("priority", "must").Error)
+
+		finalized := postFinalize(t, session.ID, "", http.StatusOK)
+
+		require.NotNil(t, finalized.WinnerContentID)
+		assert.Equal(t, candidateB.ID, *finalized.WinnerContentID, "must use the frozen 'low' snapshot, not the edited 'must' value")
+	})
+
+	t.Run("ranked: round-trips to a winner from the candidate set", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		bob := seedTestProfile(t, "Bob")
+		group := seedTestGroup(t, nil, testProfileID, bob.ID)
+		content1 := seedTestContent(t)
+		content2 := seedTestContent(t)
+		seedActiveWatchlistItem(t, testProfileID, content1.ID)
+		seedActiveWatchlistItem(t, bob.ID, content2.ID)
+
+		session := postCreateSession(t, group.ID, dto.CreateSessionRequest{
+			Method:              "ranked",
+			ParticipantIDs:      []uuid.UUID{testProfileID, bob.ID},
+			CandidateContentIDs: []uuid.UUID{content1.ID, content2.ID},
+		}, http.StatusCreated)
+
+		postSessionAction(t, session.ID, "rankings", dto.SubmitRankingRequest{Ranking: []uuid.UUID{content1.ID, content2.ID}}, "", http.StatusOK)
+		postSessionAction(t, session.ID, "rankings", dto.SubmitRankingRequest{Ranking: []uuid.UUID{content2.ID, content1.ID}}, bob.ID.String(), http.StatusOK)
+
+		finalized := postFinalize(t, session.ID, "", http.StatusOK)
+
+		assert.Equal(t, "completed", finalized.Status)
+		require.NotNil(t, finalized.WinnerContentID)
+		assert.Contains(t, []uuid.UUID{content1.ID, content2.ID}, *finalized.WinnerContentID)
+	})
+
+	t.Run("round_robin: winner matches the chooser's pick and the group's round_robin_pointer advances", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		bob := seedTestProfile(t, "Bob")
+		group := seedTestGroup(t, nil, testProfileID, bob.ID)
+		content := seedTestContent(t)
+		seedActiveWatchlistItem(t, testProfileID, content.ID)
+
+		session := postCreateSession(t, group.ID, dto.CreateSessionRequest{
+			Method:              "roundRobin",
+			ParticipantIDs:      []uuid.UUID{testProfileID, bob.ID},
+			CandidateContentIDs: []uuid.UUID{content.ID},
+		}, http.StatusCreated)
+		require.NotNil(t, session.CurrentChooserProfileID)
+
+		chooserHeader := ""
+		if *session.CurrentChooserProfileID != testProfileID {
+			chooserHeader = session.CurrentChooserProfileID.String()
+		}
+		postSessionAction(t, session.ID, "select", dto.CastVoteRequest{ContentID: content.ID}, chooserHeader, http.StatusOK)
+
+		var groupBefore entity.Group
+		require.NoError(t, testDB.First(&groupBefore, "id = ?", group.ID).Error)
+
+		finalized := postFinalize(t, session.ID, "", http.StatusOK)
+
+		assert.Equal(t, "completed", finalized.Status)
+		require.NotNil(t, finalized.WinnerContentID)
+		assert.Equal(t, content.ID, *finalized.WinnerContentID)
+
+		var groupAfter entity.Group
+		require.NoError(t, testDB.First(&groupAfter, "id = ?", group.ID).Error)
+		assert.Equal(t, groupBefore.RoundRobinPointer+1, groupAfter.RoundRobinPointer)
+	})
+
+	t.Run("random: round-trips to a winner from the candidate set with no live input", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		group := seedTestGroup(t, nil, testProfileID)
+		content1 := seedTestContent(t)
+		content2 := seedTestContent(t)
+		seedActiveWatchlistItem(t, testProfileID, content1.ID)
+		seedActiveWatchlistItem(t, testProfileID, content2.ID)
+
+		session := postCreateSession(t, group.ID, dto.CreateSessionRequest{
+			Method:              "random",
+			ParticipantIDs:      []uuid.UUID{testProfileID},
+			CandidateContentIDs: []uuid.UUID{content1.ID, content2.ID},
+		}, http.StatusCreated)
+
+		finalized := postFinalize(t, session.ID, "", http.StatusOK)
+
+		assert.Equal(t, "completed", finalized.Status)
+		require.NotNil(t, finalized.WinnerContentID)
+		assert.Contains(t, []uuid.UUID{content1.ID, content2.ID}, *finalized.WinnerContentID)
+	})
+
+	t.Run("404s for a group member who is not a session participant", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		bob := seedTestProfile(t, "Bob")
+		group := seedTestGroup(t, nil, testProfileID, bob.ID)
+		content := seedTestContent(t)
+		seedActiveWatchlistItem(t, testProfileID, content.ID)
+
+		session := postCreateSession(t, group.ID, dto.CreateSessionRequest{
+			Method:              "majority",
+			ParticipantIDs:      []uuid.UUID{testProfileID},
+			CandidateContentIDs: []uuid.UUID{content.ID},
+		}, http.StatusCreated)
+
+		postFinalize(t, session.ID, bob.ID.String(), http.StatusNotFound)
+	})
+
+	t.Run("409s when finalizing an already-completed session", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		group := seedTestGroup(t, nil, testProfileID)
+		content := seedTestContent(t)
+		seedActiveWatchlistItem(t, testProfileID, content.ID)
+
+		session := postCreateSession(t, group.ID, dto.CreateSessionRequest{
+			Method:              "random",
+			ParticipantIDs:      []uuid.UUID{testProfileID},
+			CandidateContentIDs: []uuid.UUID{content.ID},
+		}, http.StatusCreated)
+
+		postFinalize(t, session.ID, "", http.StatusOK)
+		postFinalize(t, session.ID, "", http.StatusConflict)
+	})
+}
+
 // mustDataEnvelope wraps env in the {"data": ...} shape every handler in
 // this codebase responds with, so callers can json.Unmarshal the raw POST
 // body straight into it.

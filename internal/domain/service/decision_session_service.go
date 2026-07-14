@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/itsLeonB/go-crud"
@@ -32,6 +33,11 @@ type DecisionSessionService interface {
 	// {contentId} shape and the session_votes table (see this file's
 	// upsertVote doc comment).
 	Select(ctx context.Context, profileID, sessionID uuid.UUID, request dto.CastVoteRequest) (dto.TallyResponse, error)
+	// Finalize dispatches to the session's method resolver, sets the
+	// winner/status/finalizedAt atomically, and — for round_robin — advances
+	// groups.round_robin_pointer. Idempotency is enforced by
+	// loadVotingSession's status=="voting" guard: a second call 409s.
+	Finalize(ctx context.Context, profileID, sessionID uuid.UUID) (dto.SessionResponse, error)
 }
 
 type decisionSessionServiceImpl struct {
@@ -594,4 +600,105 @@ func (dss *decisionSessionServiceImpl) Select(ctx context.Context, profileID, se
 		return dto.TallyResponse{}, err
 	}
 	return dto.TallyResponse{Tally: tally}, nil
+}
+
+func (dss *decisionSessionServiceImpl) Finalize(ctx context.Context, profileID, sessionID uuid.UUID) (dto.SessionResponse, error) {
+	ctx, span := otel.Tracer.Start(ctx, "DecisionSessionService.Finalize")
+	defer span.End()
+
+	session, err := dss.loadVotingSession(ctx, sessionID, profileID, []string{"Participants.Profile", "Candidates.Content"})
+	if err != nil {
+		return dto.SessionResponse{}, err
+	}
+
+	candidateIDs := make([]uuid.UUID, len(session.Candidates))
+	for i, c := range session.Candidates {
+		candidateIDs[i] = c.ContentID
+	}
+
+	var winnerID uuid.UUID
+	switch session.Method {
+	case "majority":
+		voteSpec := crud.Specification[entity.SessionVote]{}
+		voteSpec.Model.SessionID = sessionID
+		votes, err := dss.sessionVoteRepo.FindAll(ctx, voteSpec)
+		if err != nil {
+			return dto.SessionResponse{}, err
+		}
+		winnerID = resolveMajority(candidateIDs, votes, session.RandomSeed)
+
+	case "ranked":
+		rankingSpec := crud.Specification[entity.SessionRanking]{}
+		rankingSpec.Model.SessionID = sessionID
+		rankings, err := dss.sessionRankingRepo.FindAll(ctx, rankingSpec)
+		if err != nil {
+			return dto.SessionResponse{}, err
+		}
+		winnerID = resolveRanked(candidateIDs, rankings, session.RandomSeed)
+
+	case "priority":
+		snapshotSpec := crud.Specification[entity.SessionPrioritySnapshot]{}
+		snapshotSpec.Model.SessionID = sessionID
+		snapshots, err := dss.sessionPrioritySnapshotRepo.FindAll(ctx, snapshotSpec)
+		if err != nil {
+			return dto.SessionResponse{}, err
+		}
+		winnerID = resolvePriority(candidateIDs, snapshots, session.RandomSeed)
+
+	case "round_robin":
+		chooser, err := dss.currentChooser(ctx, session)
+		if err != nil {
+			return dto.SessionResponse{}, err
+		}
+		var chooserVote *entity.SessionVote
+		if chooser != nil {
+			voteSpec := crud.Specification[entity.SessionVote]{}
+			voteSpec.Model.SessionID = sessionID
+			voteSpec.Model.ProfileID = *chooser
+			v, err := dss.sessionVoteRepo.FindFirst(ctx, voteSpec)
+			if err != nil {
+				return dto.SessionResponse{}, err
+			}
+			if !v.IsZero() {
+				chooserVote = &v
+			}
+		}
+		winnerID = resolveRoundRobin(candidateIDs, chooserVote, session.RandomSeed)
+
+	case "random":
+		winnerID = resolveRandom(candidateIDs, session.RandomSeed)
+	}
+
+	now := time.Now()
+
+	err = dss.transactor.WithinTransaction(ctx, func(ctx context.Context) error {
+		session.WinnerContentID = &winnerID
+		session.Status = "completed"
+		session.FinalizedAt = &now
+		if _, err := dss.decisionSessionRepo.Update(ctx, session); err != nil {
+			return err
+		}
+
+		if session.Method == "round_robin" {
+			groupSpec := crud.Specification[entity.Group]{}
+			groupSpec.Model.ID = session.GroupID
+			group, err := dss.groupRepo.FindFirst(ctx, groupSpec)
+			if err != nil {
+				return err
+			}
+			group.RoundRobinPointer++
+			if _, err := dss.groupRepo.Update(ctx, group); err != nil {
+				return err
+			}
+		}
+
+		// TODO(Task 5): publish winner over Redis pub/sub
+
+		return nil
+	})
+	if err != nil {
+		return dto.SessionResponse{}, err
+	}
+
+	return dss.Get(ctx, profileID, sessionID)
 }

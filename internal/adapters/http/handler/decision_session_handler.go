@@ -180,3 +180,29 @@ func (dsh *DecisionSessionHandler) HandleSelect() gin.HandlerFunc {
 		return dsh.decisionSessionService.Select(ctx.Request.Context(), profileID, sessionID, request)
 	})
 }
+
+// HandleFinalize godoc
+// @Summary      Finalize a decision session and lock in the winner
+// @Tags         sessions
+// @Security     BearerAuth
+// @Produce      json
+// @Param        sessionID path string true "Session ID"
+// @Success      200  {object}  response.JSONResponse[dto.SessionResponse]
+// @Failure      404  {object}  map[string]any
+// @Failure      409  {object}  map[string]any
+// @Router       /sessions/{sessionID}/finalize [post]
+func (dsh *DecisionSessionHandler) HandleFinalize() gin.HandlerFunc {
+	return server.Handler("DecisionSessionHandler.HandleFinalize", http.StatusOK, func(ctx *gin.Context) (any, error) {
+		profileID, err := getProfileID(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		sessionID, err := server.GetRequiredPathParam[uuid.UUID](ctx, appconstant.ContextSessionID.String())
+		if err != nil {
+			return nil, err
+		}
+
+		return dsh.decisionSessionService.Finalize(ctx.Request.Context(), profileID, sessionID)
+	})
+}
