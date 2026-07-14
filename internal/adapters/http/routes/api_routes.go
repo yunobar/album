@@ -90,6 +90,7 @@ func RegisterAPIRoutes(router *gin.Engine, handlers *handler.Handlers, authMiddl
 					sessionRoutes.POST("/:"+appconstant.ContextSessionID.String()+"/rankings", handlers.DecisionSession.HandleSubmitRanking())
 					sessionRoutes.POST("/:"+appconstant.ContextSessionID.String()+"/select", handlers.DecisionSession.HandleSelect())
 					sessionRoutes.POST("/:"+appconstant.ContextSessionID.String()+"/finalize", handlers.DecisionSession.HandleFinalize())
+					sessionRoutes.GET("/:"+appconstant.ContextSessionID.String()+"/live", handlers.DecisionSession.HandleLive())
 				}
 			}
 		}

@@ -49,3 +49,8 @@ packages:
       KeyValue:
         config:
           all: true
+  github.com/yunobar/album/internal/core/pubsub:
+    interfaces:
+      Publisher:
+        config:
+          all: true

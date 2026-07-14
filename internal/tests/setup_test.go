@@ -11,8 +11,11 @@ import (
 	"github.com/itsLeonB/ginkgo/pkg/middleware"
 	"github.com/itsLeonB/go-crud"
 	"github.com/itsLeonB/ungerr"
+	"github.com/nats-io/nats.go"
+	"github.com/yunobar/album/internal/adapters/http/handler"
 	"github.com/yunobar/album/internal/appconstant"
 	"github.com/yunobar/album/internal/core/logger"
+	"github.com/yunobar/album/internal/core/pubsub"
 	"github.com/yunobar/album/internal/domain/dto"
 	"github.com/yunobar/album/internal/domain/entity"
 	"github.com/yunobar/album/internal/domain/service"
@@ -22,6 +25,7 @@ import (
 
 var (
 	testDB     *gorm.DB
+	testNATS   *nats.Conn
 	testRouter *gin.Engine
 
 	testProfileID = uuid.MustParse("00000000-0000-0000-0000-000000000002")
@@ -40,6 +44,10 @@ func TestMain(m *testing.M) {
 	}
 	testDB = db
 	defer cleanup()
+
+	nc, natsCleanup := testhelpers.SetupTestNATS()
+	testNATS = nc
+	defer natsCleanup()
 
 	logger.Init("album-test")
 	testRouter = setupTestRouter(db)
@@ -98,6 +106,11 @@ func registerTestRoutes(r *gin.Engine, db *gorm.DB) {
 		crud.NewRepository[entity.SessionPrioritySnapshot](db),
 		crud.NewRepository[entity.SessionVote](db),
 		crud.NewRepository[entity.SessionRanking](db),
+		// The real NATS-backed publisher, not a mock — nats-go's Publish
+		// gracefully returns ErrInvalidConnection on a nil *nats.Conn (see
+		// nats.go's (*Conn).publish nil check), so every non-WS feature test
+		// keeps passing even when testNATS is nil (no local NATS server).
+		pubsub.NewPublisher(testNATS),
 	)
 
 	// Routes
@@ -346,6 +359,14 @@ func registerTestRoutes(r *gin.Engine, db *gorm.DB) {
 		}
 		c.JSON(http.StatusOK, gin.H{"data": resp})
 	})
+
+	// Live updates (Task 5) — registered via the real handler, not a thin
+	// inline closure, since this is the one endpoint that needs the actual
+	// WS-upgrade/NATS-subscribe/forward code under test, using the real
+	// testNATS connection (nil-safe, see NewDecisionSessionService call
+	// above) rather than a mock.
+	decisionSessionHandler := handler.NewDecisionSessionHandler(decisionSessionSvc, testNATS)
+	api.GET("/sessions/:sessionID/live", decisionSessionHandler.HandleLive())
 }
 
 func getTestProfileID(c *gin.Context) uuid.UUID {

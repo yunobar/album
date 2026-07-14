@@ -39,6 +39,17 @@ type SelectionTally struct {
 	SelectedContentID *uuid.UUID `json:"selectedContentId"`
 }
 
+type LiveTallyMessage struct {
+	Type  string `json:"type"` // always "tally"
+	Tally any    `json:"tally"`
+}
+
+type LiveWinnerMessage struct {
+	Type            string    `json:"type"` // always "winner"
+	WinnerContentID uuid.UUID `json:"winnerContentId"`
+	FinalizedAt     time.Time `json:"finalizedAt"`
+}
+
 type SessionResponse struct {
 	ID                      uuid.UUID         `json:"id"`
 	GroupID                 uuid.UUID         `json:"groupId"`

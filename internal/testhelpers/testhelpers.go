@@ -3,10 +3,13 @@ package testhelpers
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"testing"
+	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/kelseyhightower/envconfig"
+	"github.com/nats-io/nats.go"
 	"github.com/pressly/goose/v3"
 	"github.com/yunobar/album/internal/adapters/db/postgres/migrations"
 	"gorm.io/driver/postgres"
@@ -94,5 +97,30 @@ func RequireTestDB(t *testing.T, db *gorm.DB) {
 	t.Helper()
 	if db == nil {
 		t.Skip("test DB not available")
+	}
+}
+
+// SetupTestNATS connects to a local NATS server for pub/sub feature
+// tests. Returns a nil conn (not an error) if unreachable — this project's
+// established pattern (see SetupTestDB) is graceful skip over hard
+// failure when optional local infra isn't running; CI provisions no
+// services at all, matching how the DB-backed tests already skip there.
+func SetupTestNATS() (*nats.Conn, func()) {
+	url := os.Getenv("TEST_NATS_URL")
+	if url == "" {
+		url = nats.DefaultURL
+	}
+	nc, err := nats.Connect(url, nats.Timeout(2*time.Second))
+	if err != nil {
+		return nil, func() {}
+	}
+	return nc, func() { nc.Close() }
+}
+
+// RequireTestNATS skips the test if no local NATS server is reachable.
+func RequireTestNATS(t *testing.T, nc *nats.Conn) {
+	t.Helper()
+	if nc == nil {
+		t.Skip("test NATS server not available")
 	}
 }

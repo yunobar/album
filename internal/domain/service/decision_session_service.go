@@ -4,6 +4,7 @@ import (
 	"context"
 	cryptorand "crypto/rand"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/itsLeonB/ungerr"
 	"github.com/yunobar/album/internal/appconstant"
 	"github.com/yunobar/album/internal/core/otel"
+	"github.com/yunobar/album/internal/core/pubsub"
 	"github.com/yunobar/album/internal/domain/dto"
 	"github.com/yunobar/album/internal/domain/entity"
 	"github.com/yunobar/album/internal/domain/mapper"
@@ -41,6 +43,10 @@ type DecisionSessionService interface {
 	// the second sees status=="completed" and 409s instead of racing to
 	// silently overwrite the winner.
 	Finalize(ctx context.Context, profileID, sessionID uuid.UUID) (dto.SessionResponse, error)
+	// VerifyParticipant is requireParticipant exported for callers outside
+	// this service (the WS handler, which must reject non-participants
+	// before upgrading the connection).
+	VerifyParticipant(ctx context.Context, profileID, sessionID uuid.UUID) error
 }
 
 type decisionSessionServiceImpl struct {
@@ -54,6 +60,7 @@ type decisionSessionServiceImpl struct {
 	sessionPrioritySnapshotRepo crud.Repository[entity.SessionPrioritySnapshot]
 	sessionVoteRepo             crud.Repository[entity.SessionVote]
 	sessionRankingRepo          crud.Repository[entity.SessionRanking]
+	publisher                   pubsub.Publisher
 }
 
 func NewDecisionSessionService(
@@ -67,6 +74,7 @@ func NewDecisionSessionService(
 	sessionPrioritySnapshotRepo crud.Repository[entity.SessionPrioritySnapshot],
 	sessionVoteRepo crud.Repository[entity.SessionVote],
 	sessionRankingRepo crud.Repository[entity.SessionRanking],
+	publisher pubsub.Publisher,
 ) DecisionSessionService {
 	return &decisionSessionServiceImpl{
 		transactor,
@@ -79,6 +87,7 @@ func NewDecisionSessionService(
 		sessionPrioritySnapshotRepo,
 		sessionVoteRepo,
 		sessionRankingRepo,
+		publisher,
 	}
 }
 
@@ -219,15 +228,8 @@ func (dss *decisionSessionServiceImpl) Get(ctx context.Context, profileID, sessi
 	// PreloadRelations can't express "only preload if a matching
 	// participant row exists for X", and this keeps the 404-for-non-
 	// participant path from touching the bigger preloaded query.
-	participantSpec := crud.Specification[entity.SessionParticipant]{}
-	participantSpec.Model.SessionID = sessionID
-	participantSpec.Model.ProfileID = profileID
-	participation, err := dss.sessionParticipantRepo.FindFirst(ctx, participantSpec)
-	if err != nil {
+	if err := dss.requireParticipant(ctx, sessionID, profileID); err != nil {
 		return dto.SessionResponse{}, err
-	}
-	if participation.IsZero() {
-		return dto.SessionResponse{}, ungerr.NotFoundError(fmt.Sprintf("session %s is not found", sessionID))
 	}
 
 	sessionSpec := crud.Specification[entity.DecisionSession]{
@@ -366,21 +368,38 @@ func (dss *decisionSessionServiceImpl) CapturePrioritySnapshots(ctx context.Cont
 	return err
 }
 
+// requireParticipant returns the same NotFoundError whether the session
+// doesn't exist or the caller isn't a participant — the non-disclosure
+// rule every session-scoped endpoint follows.
+func (dss *decisionSessionServiceImpl) requireParticipant(ctx context.Context, sessionID, profileID uuid.UUID) error {
+	spec := crud.Specification[entity.SessionParticipant]{}
+	spec.Model.SessionID = sessionID
+	spec.Model.ProfileID = profileID
+	participation, err := dss.sessionParticipantRepo.FindFirst(ctx, spec)
+	if err != nil {
+		return err
+	}
+	if participation.IsZero() {
+		return ungerr.NotFoundError(fmt.Sprintf("session %s is not found", sessionID))
+	}
+	return nil
+}
+
+// VerifyParticipant is requireParticipant exported for callers outside this
+// service (the WS handler, which must reject non-participants before
+// upgrading the connection).
+func (dss *decisionSessionServiceImpl) VerifyParticipant(ctx context.Context, profileID, sessionID uuid.UUID) error {
+	return dss.requireParticipant(ctx, sessionID, profileID)
+}
+
 // loadVotingSession is the shared guard for every mutating input endpoint:
 // participant check (404, non-disclosure) → session load with the given
 // preloads → status check (409 if not "voting"). Method-specific checks
 // (right endpoint for this session's method, payload validity) happen in
 // each caller after this returns.
 func (dss *decisionSessionServiceImpl) loadVotingSession(ctx context.Context, sessionID, profileID uuid.UUID, preloads []string) (entity.DecisionSession, error) {
-	participantSpec := crud.Specification[entity.SessionParticipant]{}
-	participantSpec.Model.SessionID = sessionID
-	participantSpec.Model.ProfileID = profileID
-	participation, err := dss.sessionParticipantRepo.FindFirst(ctx, participantSpec)
-	if err != nil {
+	if err := dss.requireParticipant(ctx, sessionID, profileID); err != nil {
 		return entity.DecisionSession{}, err
-	}
-	if participation.IsZero() {
-		return entity.DecisionSession{}, ungerr.NotFoundError(fmt.Sprintf("session %s is not found", sessionID))
 	}
 
 	spec := crud.Specification[entity.DecisionSession]{PreloadRelations: preloads}
@@ -519,6 +538,7 @@ func (dss *decisionSessionServiceImpl) CastVote(ctx context.Context, profileID, 
 	if err != nil {
 		return dto.TallyResponse{}, err
 	}
+	dss.publishTally(sessionID, tally)
 	return dto.TallyResponse{Tally: tally}, nil
 }
 
@@ -577,6 +597,7 @@ func (dss *decisionSessionServiceImpl) SubmitRanking(ctx context.Context, profil
 	if err != nil {
 		return dto.TallyResponse{}, err
 	}
+	dss.publishTally(sessionID, tally)
 	return dto.TallyResponse{Tally: tally}, nil
 }
 
@@ -610,7 +631,23 @@ func (dss *decisionSessionServiceImpl) Select(ctx context.Context, profileID, se
 	if err != nil {
 		return dto.TallyResponse{}, err
 	}
+	dss.publishTally(sessionID, tally)
 	return dto.TallyResponse{Tally: tally}, nil
+}
+
+// publishTally is the shared best-effort publish behind CastVote,
+// SubmitRanking, and Select — a publish failure (marshal error or transport
+// error) must never fail the request: the vote/ranking/select itself
+// already succeeded and was persisted, and a client that misses the live
+// update re-fetches GET /sessions/:id per the API contract's reconnect
+// story. The existing otel span on each caller already gives observability
+// for this method's own duration; no new logging infra is added here.
+func (dss *decisionSessionServiceImpl) publishTally(sessionID uuid.UUID, tally any) {
+	data, err := json.Marshal(dto.LiveTallyMessage{Type: "tally", Tally: tally})
+	if err != nil {
+		return
+	}
+	_ = dss.publisher.Publish(pubsub.LiveSubject(sessionID), data)
 }
 
 func (dss *decisionSessionServiceImpl) Finalize(ctx context.Context, profileID, sessionID uuid.UUID) (dto.SessionResponse, error) {
@@ -620,20 +657,14 @@ func (dss *decisionSessionServiceImpl) Finalize(ctx context.Context, profileID, 
 	// The participant-existence check has no race (a participant row's
 	// existence doesn't change during finalize), so it stays outside the
 	// transaction — mirrors loadVotingSession's own separation.
-	participantSpec := crud.Specification[entity.SessionParticipant]{}
-	participantSpec.Model.SessionID = sessionID
-	participantSpec.Model.ProfileID = profileID
-	participation, err := dss.sessionParticipantRepo.FindFirst(ctx, participantSpec)
-	if err != nil {
+	if err := dss.requireParticipant(ctx, sessionID, profileID); err != nil {
 		return dto.SessionResponse{}, err
-	}
-	if participation.IsZero() {
-		return dto.SessionResponse{}, ungerr.NotFoundError(fmt.Sprintf("session %s is not found", sessionID))
 	}
 
 	now := time.Now()
+	var winnerID uuid.UUID
 
-	err = dss.transactor.WithinTransaction(ctx, func(ctx context.Context) error {
+	err := dss.transactor.WithinTransaction(ctx, func(ctx context.Context) error {
 		// Session load + status check happen inside the transaction, under
 		// ForUpdate, so a concurrent Finalize on the same session blocks
 		// here instead of racing this one to compute-then-overwrite the
@@ -659,7 +690,6 @@ func (dss *decisionSessionServiceImpl) Finalize(ctx context.Context, profileID, 
 			candidateIDs[i] = c.ContentID
 		}
 
-		var winnerID uuid.UUID
 		var lockedGroup entity.Group
 		switch session.Method {
 		case "majority":
@@ -746,12 +776,21 @@ func (dss *decisionSessionServiceImpl) Finalize(ctx context.Context, profileID, 
 			}
 		}
 
-		// TODO(Task 5): publish winner over Redis pub/sub
-
 		return nil
 	})
 	if err != nil {
 		return dto.SessionResponse{}, err
+	}
+
+	// Published after the transaction commits successfully, using the
+	// already-known winnerID/now — never publish a winner that didn't
+	// actually get persisted.
+	if data, err := json.Marshal(dto.LiveWinnerMessage{
+		Type:            "winner",
+		WinnerContentID: winnerID,
+		FinalizedAt:     now,
+	}); err == nil {
+		_ = dss.publisher.Publish(pubsub.LiveSubject(sessionID), data)
 	}
 
 	return dss.Get(ctx, profileID, sessionID)

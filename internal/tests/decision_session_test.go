@@ -6,10 +6,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/yunobar/album/internal/domain/dto"
@@ -859,6 +862,115 @@ func TestDecisionSessionFinalize(t *testing.T) {
 		}
 		assert.Equal(t, 1, okCount, "exactly one concurrent finalize call should win with 200")
 		assert.Equal(t, attempts-1, conflictCount, "every other concurrent call should 409, not silently re-resolve")
+	})
+}
+
+func TestDecisionSessionLive(t *testing.T) {
+	testhelpers.RequireTestDB(t, testDB)
+
+	// Not NATS-gated: a non-participant is rejected by VerifyParticipant
+	// before the WS upgrade even happens, so this is a plain HTTP
+	// assertion — no WS client needed, and it runs everywhere (including
+	// without a local NATS server).
+	t.Run("404s for a non-participant without upgrading the connection", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		bob := seedTestProfile(t, "Bob")
+		group := seedTestGroup(t, nil, testProfileID)
+		content := seedTestContent(t)
+		seedActiveWatchlistItem(t, testProfileID, content.ID)
+
+		session := postCreateSession(t, group.ID, dto.CreateSessionRequest{
+			Method:              "majority",
+			ParticipantIDs:      []uuid.UUID{testProfileID},
+			CandidateContentIDs: []uuid.UUID{content.ID},
+		}, http.StatusCreated)
+
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodGet, "/api/v1/sessions/"+session.ID.String()+"/live", nil)
+		req.Header.Set(testProfileIDHeader, bob.ID.String())
+		testRouter.ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+
+	// NATS-gated: exercises the genuine publish -> NATS -> subscribe ->
+	// forward path end to end, so it needs a reachable local (or CI)
+	// NATS server — skips gracefully via RequireTestNATS otherwise.
+	t.Run("forwards live tally and winner updates to a connected participant", func(t *testing.T) {
+		testhelpers.RequireTestNATS(t, testNATS)
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		bob := seedTestProfile(t, "Bob")
+		group := seedTestGroup(t, nil, testProfileID, bob.ID)
+		content1 := seedTestContent(t)
+		content2 := seedTestContent(t)
+		seedActiveWatchlistItem(t, testProfileID, content1.ID)
+		seedActiveWatchlistItem(t, bob.ID, content2.ID)
+
+		session := postCreateSession(t, group.ID, dto.CreateSessionRequest{
+			Method:              "majority",
+			ParticipantIDs:      []uuid.UUID{testProfileID, bob.ID},
+			CandidateContentIDs: []uuid.UUID{content1.ID, content2.ID},
+		}, http.StatusCreated)
+
+		httpServer := httptest.NewServer(testRouter)
+		defer httpServer.Close()
+
+		wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/api/v1/sessions/" + session.ID.String() + "/live"
+		header := http.Header{}
+		header.Set(testProfileIDHeader, testProfileID.String())
+		conn, _, err := websocket.DefaultDialer.Dial(wsURL, header)
+		require.NoError(t, err)
+		defer func() { _ = conn.Close() }()
+
+		// The Dial call returns once the server has written the HTTP 101
+		// upgrade response, which happens before the handler reaches
+		// ChanSubscribe — give it a moment to actually subscribe before
+		// publishing, or the vote's tally message races the subscription
+		// and is silently missed (this is exactly the "best-effort,
+		// reconnect re-fetches GET" contract the design accepts).
+		time.Sleep(200 * time.Millisecond)
+
+		// Cast a vote over a normal HTTP request on a separate connection.
+		postSessionAction(t, session.ID, "votes", dto.CastVoteRequest{ContentID: content1.ID}, "", http.StatusOK)
+
+		require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+		_, tallyFrame, err := conn.ReadMessage()
+		require.NoError(t, err)
+
+		var tallyMsg struct {
+			Type  string `json:"type"`
+			Tally struct {
+				Counts map[string]int `json:"counts"`
+			} `json:"tally"`
+		}
+		require.NoError(t, json.Unmarshal(tallyFrame, &tallyMsg))
+		assert.Equal(t, "tally", tallyMsg.Type)
+		assert.Equal(t, 1, tallyMsg.Tally.Counts[content1.ID.String()])
+
+		// Second participant votes the same way so the winner is
+		// unambiguous, then finalize.
+		postSessionAction(t, session.ID, "votes", dto.CastVoteRequest{ContentID: content1.ID}, bob.ID.String(), http.StatusOK)
+
+		// Drain the second vote's own tally broadcast before finalizing, so
+		// it isn't mistaken for the winner frame below.
+		require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+		_, _, err = conn.ReadMessage()
+		require.NoError(t, err)
+
+		finalized := postFinalize(t, session.ID, "", http.StatusOK)
+		require.NotNil(t, finalized.WinnerContentID)
+
+		require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+		_, winnerFrame, err := conn.ReadMessage()
+		require.NoError(t, err)
+
+		var winnerMsg dto.LiveWinnerMessage
+		require.NoError(t, json.Unmarshal(winnerFrame, &winnerMsg))
+		assert.Equal(t, "winner", winnerMsg.Type)
+		assert.Equal(t, *finalized.WinnerContentID, winnerMsg.WinnerContentID)
+		assert.False(t, winnerMsg.FinalizedAt.IsZero())
 	})
 }
 

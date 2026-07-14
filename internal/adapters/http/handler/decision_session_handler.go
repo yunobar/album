@@ -5,19 +5,33 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 	_ "github.com/itsLeonB/ginkgo/pkg/response"
 	"github.com/itsLeonB/ginkgo/pkg/server"
+	"github.com/nats-io/nats.go"
 	"github.com/yunobar/album/internal/appconstant"
+	"github.com/yunobar/album/internal/core/pubsub"
 	"github.com/yunobar/album/internal/domain/dto"
 	"github.com/yunobar/album/internal/domain/service"
 )
 
 type DecisionSessionHandler struct {
 	decisionSessionService service.DecisionSessionService
+	natsConn               *nats.Conn
 }
 
-func NewDecisionSessionHandler(decisionSessionService service.DecisionSessionService) *DecisionSessionHandler {
-	return &DecisionSessionHandler{decisionSessionService}
+func NewDecisionSessionHandler(decisionSessionService service.DecisionSessionService, natsConn *nats.Conn) *DecisionSessionHandler {
+	return &DecisionSessionHandler{decisionSessionService, natsConn}
+}
+
+var wsUpgrader = websocket.Upgrader{
+	// ponytail: origin/CSRF enforcement for the WS handshake is the same
+	// session-cookie auth every other route already gets from
+	// authMiddleware (this route sits in the same protectedRoutes group) —
+	// CheckOrigin here would be redundant defense, add real origin
+	// allowlisting only if this API is ever exposed to browsers outside
+	// this project's own frontend origin.
+	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
 // HandleCreate godoc
@@ -205,4 +219,69 @@ func (dsh *DecisionSessionHandler) HandleFinalize() gin.HandlerFunc {
 
 		return dsh.decisionSessionService.Finalize(ctx.Request.Context(), profileID, sessionID)
 	})
+}
+
+// HandleLive godoc
+// @Summary      Live tally/winner updates for a session
+// @Tags         sessions
+// @Security     BearerAuth
+// @Param        sessionID path string true "Session ID"
+// @Router       /sessions/{sessionID}/live [get]
+func (dsh *DecisionSessionHandler) HandleLive() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		profileID, err := getProfileID(ctx)
+		if err != nil {
+			_ = ctx.Error(err)
+			return
+		}
+		sessionID, err := server.GetRequiredPathParam[uuid.UUID](ctx, appconstant.ContextSessionID.String())
+		if err != nil {
+			_ = ctx.Error(err)
+			return
+		}
+		if err := dsh.decisionSessionService.VerifyParticipant(ctx.Request.Context(), profileID, sessionID); err != nil {
+			_ = ctx.Error(err)
+			return
+		}
+
+		conn, err := wsUpgrader.Upgrade(ctx.Writer, ctx.Request, nil)
+		if err != nil {
+			return // Upgrade already wrote its own HTTP error response
+		}
+		defer func() { _ = conn.Close() }()
+
+		msgCh := make(chan *nats.Msg, 16)
+		sub, err := dsh.natsConn.ChanSubscribe(pubsub.LiveSubject(sessionID), msgCh)
+		if err != nil {
+			return
+		}
+		defer func() { _ = sub.Unsubscribe() }()
+
+		// This channel is server -> client only (no client input expected);
+		// a background read loop's only job is detecting when the client
+		// closes the connection, so the write loop below can stop.
+		disconnected := make(chan struct{})
+		go func() {
+			defer close(disconnected)
+			for {
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+			}
+		}()
+
+		for {
+			select {
+			case <-disconnected:
+				return
+			case msg, ok := <-msgCh:
+				if !ok {
+					return
+				}
+				if err := conn.WriteMessage(websocket.TextMessage, msg.Data); err != nil {
+					return
+				}
+			}
+		}
+	}
 }

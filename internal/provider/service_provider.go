@@ -10,6 +10,7 @@ import (
 	"github.com/yunobar/album/internal/core/cache"
 	"github.com/yunobar/album/internal/core/config"
 	"github.com/yunobar/album/internal/core/otel"
+	"github.com/yunobar/album/internal/core/pubsub"
 	"github.com/yunobar/album/internal/domain/client"
 	"github.com/yunobar/album/internal/domain/service"
 )
@@ -66,6 +67,7 @@ func ProvideServices(
 		repos.SessionPrioritySnapshot,
 		repos.SessionVote,
 		repos.SessionRanking,
+		pubsub.NewPublisher(coreSvc.NATSConn),
 	)
 
 	return &Services{

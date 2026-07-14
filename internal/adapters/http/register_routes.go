@@ -19,7 +19,7 @@ import (
 	"github.com/yunobar/album/internal/provider"
 )
 
-func RegisterRoutes(router *gin.Engine, configs config.Config, services *provider.Services) (func(), error) {
+func RegisterRoutes(router *gin.Engine, configs config.Config, services *provider.Services, coreSvc *provider.CoreServices) (func(), error) {
 	transport, err := authgin.NewCookieTransport(authgin.CookieConfig{
 		Domain:     configs.CookieDomain,
 		Secure:     configs.CookieSecure,
@@ -33,7 +33,7 @@ func RegisterRoutes(router *gin.Engine, configs config.Config, services *provide
 
 	authMW := authgin.AuthMiddleware(services.AuthKit, transport, authkit.RequireAuth)
 
-	handlers := handler.ProvideHandlers(services, transport)
+	handlers := handler.ProvideHandlers(services, coreSvc, transport)
 	mw := middlewares.Provide(configs.App)
 
 	router.Use(mw.Err)

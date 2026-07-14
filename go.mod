@@ -7,6 +7,7 @@ require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/go-playground/validator/v10 v10.30.3
 	github.com/google/uuid v1.6.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/itsLeonB/ezutil/v2 v2.4.0
 	github.com/itsLeonB/ginkgo v0.6.1
 	github.com/itsLeonB/go-authkit v0.2.0-pre2
