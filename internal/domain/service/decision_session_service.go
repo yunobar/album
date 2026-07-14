@@ -285,12 +285,27 @@ func (dss *decisionSessionServiceImpl) currentChooser(ctx context.Context, sessi
 	if err != nil {
 		return nil, err
 	}
+
+	groupSpec := crud.Specification[entity.Group]{}
+	groupSpec.Model.ID = session.GroupID
+	group, err := dss.groupRepo.FindFirst(ctx, groupSpec)
+	if err != nil {
+		return nil, err
+	}
+
+	return chooserFromGroup(group, members, session.Participants), nil
+}
+
+// chooserFromGroup picks the current chooser from an already-loaded
+// group's RoundRobinPointer. Pure — callers are responsible for fetching
+// group and members with whatever locking their context requires.
+func chooserFromGroup(group entity.Group, members []entity.GroupMember, participants []entity.SessionParticipant) *uuid.UUID {
 	sort.Slice(members, func(i, j int) bool {
 		return members[i].ID.String() < members[j].ID.String()
 	})
 
-	participantIDs := make(map[uuid.UUID]struct{}, len(session.Participants))
-	for _, p := range session.Participants {
+	participantIDs := make(map[uuid.UUID]struct{}, len(participants))
+	for _, p := range participants {
 		participantIDs[p.ProfileID] = struct{}{}
 	}
 
@@ -301,18 +316,11 @@ func (dss *decisionSessionServiceImpl) currentChooser(ctx context.Context, sessi
 		}
 	}
 	if len(ordered) == 0 {
-		return nil, nil
-	}
-
-	groupSpec := crud.Specification[entity.Group]{}
-	groupSpec.Model.ID = session.GroupID
-	group, err := dss.groupRepo.FindFirst(ctx, groupSpec)
-	if err != nil {
-		return nil, err
+		return nil
 	}
 
 	chooser := ordered[group.RoundRobinPointer%len(ordered)]
-	return &chooser, nil
+	return &chooser
 }
 
 func (dss *decisionSessionServiceImpl) CapturePrioritySnapshots(ctx context.Context, sessionID uuid.UUID, participantIDs, candidateIDs []uuid.UUID) error {
@@ -652,6 +660,7 @@ func (dss *decisionSessionServiceImpl) Finalize(ctx context.Context, profileID, 
 		}
 
 		var winnerID uuid.UUID
+		var lockedGroup entity.Group
 		switch session.Method {
 		case "majority":
 			voteSpec := crud.Specification[entity.SessionVote]{}
@@ -681,10 +690,24 @@ func (dss *decisionSessionServiceImpl) Finalize(ctx context.Context, profileID, 
 			winnerID = resolvePriority(candidateIDs, snapshots, session.RandomSeed)
 
 		case "round_robin":
-			chooser, err := dss.currentChooser(ctx, session)
+			// One ForUpdate-locked group fetch covers both the chooser
+			// computation and the pointer increment below — closes a race
+			// where a concurrent Finalize of a sibling round_robin session
+			// in the same group could read the pointer via a separate,
+			// unlocked fetch and compute a stale chooser.
+			memberSpec := crud.Specification[entity.GroupMember]{}
+			memberSpec.Model.GroupID = session.GroupID
+			members, err := dss.groupMemberRepo.FindAll(ctx, memberSpec)
 			if err != nil {
 				return err
 			}
+			groupSpec := crud.Specification[entity.Group]{ForUpdate: true}
+			groupSpec.Model.ID = session.GroupID
+			lockedGroup, err = dss.groupRepo.FindFirst(ctx, groupSpec)
+			if err != nil {
+				return err
+			}
+			chooser := chooserFromGroup(lockedGroup, members, session.Participants)
 			var chooserVote *entity.SessionVote
 			if chooser != nil {
 				voteSpec := crud.Specification[entity.SessionVote]{}
@@ -712,17 +735,13 @@ func (dss *decisionSessionServiceImpl) Finalize(ctx context.Context, profileID, 
 		}
 
 		if session.Method == "round_robin" {
-			// ForUpdate here serializes the read-increment-write against any
-			// other concurrent Finalize touching the same group's pointer
+			// Reuses the group fetched with ForUpdate in the round_robin case
+			// above — the same lock that serialized the chooser read also
+			// serializes this read-increment-write against any other
+			// concurrent Finalize touching the same group's pointer
 			// (lost-update race).
-			groupSpec := crud.Specification[entity.Group]{ForUpdate: true}
-			groupSpec.Model.ID = session.GroupID
-			group, err := dss.groupRepo.FindFirst(ctx, groupSpec)
-			if err != nil {
-				return err
-			}
-			group.RoundRobinPointer++
-			if _, err := dss.groupRepo.Update(ctx, group); err != nil {
+			lockedGroup.RoundRobinPointer++
+			if _, err := dss.groupRepo.Update(ctx, lockedGroup); err != nil {
 				return err
 			}
 		}

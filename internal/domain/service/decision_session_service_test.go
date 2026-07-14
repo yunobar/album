@@ -70,6 +70,40 @@ func newTestDecisionSessionService(t *testing.T) (
 	return svc, decisionSessionRepo, sessionParticipantRepo, sessionCandidateRepo, groupMemberRepo, groupRepo, watchlistRepo, snapshotRepo, sessionVoteRepo, sessionRankingRepo
 }
 
+func TestChooserFromGroup(t *testing.T) {
+	a, b, c := uuid.New(), uuid.New(), uuid.New()
+	members := []entity.GroupMember{{ProfileID: a}, {ProfileID: b}, {ProfileID: c}}
+	participants := []entity.SessionParticipant{{ProfileID: a}, {ProfileID: b}, {ProfileID: c}}
+
+	t.Run("picks the member at the pointer index", func(t *testing.T) {
+		group := entity.Group{RoundRobinPointer: 0}
+
+		chooser := chooserFromGroup(group, members, participants)
+
+		require.NotNil(t, chooser)
+	})
+
+	t.Run("pointer past the ordered length wraps via modulo", func(t *testing.T) {
+		group := entity.Group{RoundRobinPointer: 0}
+		first := chooserFromGroup(group, members, participants)
+
+		wrapped := entity.Group{RoundRobinPointer: len(participants)}
+		second := chooserFromGroup(wrapped, members, participants)
+
+		require.NotNil(t, first)
+		require.NotNil(t, second)
+		assert.Equal(t, *first, *second)
+	})
+
+	t.Run("no member is a session participant yields nil", func(t *testing.T) {
+		group := entity.Group{RoundRobinPointer: 0}
+
+		chooser := chooserFromGroup(group, members, nil)
+
+		assert.Nil(t, chooser)
+	})
+}
+
 func TestDecisionSessionService_CapturePrioritySnapshots(t *testing.T) {
 	sessionID := uuid.New()
 	profileA := uuid.New()
