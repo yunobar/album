@@ -119,21 +119,50 @@ func (dss *decisionSessionServiceImpl) Create(ctx context.Context, profileID, gr
 			return ungerr.NotFoundError(fmt.Sprintf("group %s is not found", groupID))
 		}
 
+		isCallerParticipant := false
+		seenParticipants := make(map[uuid.UUID]struct{}, len(request.ParticipantIDs))
+		uniqueParticipantIDs := make([]uuid.UUID, 0, len(request.ParticipantIDs))
 		for _, pid := range request.ParticipantIDs {
 			if _, ok := memberIDs[pid]; !ok {
 				return ungerr.BadRequestError(fmt.Sprintf("participant %s is not a member of group %s", pid, groupID))
 			}
+			if pid == profileID {
+				isCallerParticipant = true
+			}
+			if _, dup := seenParticipants[pid]; dup {
+				continue
+			}
+			seenParticipants[pid] = struct{}{}
+			uniqueParticipantIDs = append(uniqueParticipantIDs, pid)
 		}
+		// The caller must be able to see the session they just created —
+		// Get (and every other session-scoped read/write) is strictly
+		// participant-scoped, non-negotiably, so a creator who excludes
+		// themselves would otherwise get a 201 whose own follow-up Get
+		// reload 404s. Enforcing this at validation time keeps that
+		// invariant uniform instead of special-casing the post-create load.
+		if !isCallerParticipant {
+			return ungerr.BadRequestError(fmt.Sprintf("caller %s must be included in participantIds", profileID))
+		}
+		request.ParticipantIDs = uniqueParticipantIDs
 
 		validCandidates, err := dss.mergedContentIDs(ctx, groupID)
 		if err != nil {
 			return err
 		}
+		seenCandidates := make(map[uuid.UUID]struct{}, len(request.CandidateContentIDs))
+		uniqueCandidateIDs := make([]uuid.UUID, 0, len(request.CandidateContentIDs))
 		for _, cid := range request.CandidateContentIDs {
 			if _, ok := validCandidates[cid]; !ok {
 				return ungerr.BadRequestError(fmt.Sprintf("content %s is not on the group's merged watchlist", cid))
 			}
+			if _, dup := seenCandidates[cid]; dup {
+				continue
+			}
+			seenCandidates[cid] = struct{}{}
+			uniqueCandidateIDs = append(uniqueCandidateIDs, cid)
 		}
+		request.CandidateContentIDs = uniqueCandidateIDs
 
 		seed, err := generateRandomSeed()
 		if err != nil {
@@ -394,17 +423,15 @@ func (dss *decisionSessionServiceImpl) VerifyParticipant(ctx context.Context, pr
 	return dss.requireParticipant(ctx, sessionID, profileID)
 }
 
-// loadVotingSession is the shared guard for every mutating input endpoint:
-// participant check (404, non-disclosure) → session load with the given
-// preloads → status check (409 if not "voting"). Method-specific checks
-// (right endpoint for this session's method, payload validity) happen in
-// each caller after this returns.
-func (dss *decisionSessionServiceImpl) loadVotingSession(ctx context.Context, sessionID, profileID uuid.UUID, preloads []string) (entity.DecisionSession, error) {
-	if err := dss.requireParticipant(ctx, sessionID, profileID); err != nil {
-		return entity.DecisionSession{}, err
-	}
-
-	spec := crud.Specification[entity.DecisionSession]{PreloadRelations: preloads}
+// lockVotingSession loads a session with ForUpdate and verifies it's still
+// "voting" (409 otherwise). Must be called from inside a
+// transactor.WithinTransaction closure — the row lock only holds for that
+// transaction's lifetime, so calling this standalone gives no protection
+// against a concurrent Finalize interleaving between this check and the
+// caller's write (the exact TOCTOU class Finalize itself was fixed for;
+// every mutating endpoint needs the same guarantee, not just Finalize).
+func (dss *decisionSessionServiceImpl) lockVotingSession(ctx context.Context, sessionID uuid.UUID, preloads []string) (entity.DecisionSession, error) {
+	spec := crud.Specification[entity.DecisionSession]{PreloadRelations: preloads, ForUpdate: true}
 	spec.Model.ID = sessionID
 	session, err := dss.decisionSessionRepo.FindFirst(ctx, spec)
 	if err != nil {
@@ -522,17 +549,28 @@ func (dss *decisionSessionServiceImpl) CastVote(ctx context.Context, profileID, 
 	ctx, span := otel.Tracer.Start(ctx, "DecisionSessionService.CastVote")
 	defer span.End()
 
-	session, err := dss.loadVotingSession(ctx, sessionID, profileID, []string{"Candidates"})
-	if err != nil {
+	if err := dss.requireParticipant(ctx, sessionID, profileID); err != nil {
 		return dto.TallyResponse{}, err
 	}
-	if session.Method != "majority" {
-		return dto.TallyResponse{}, ungerr.BadRequestError(fmt.Sprintf("session %s is not a majority session", sessionID))
-	}
-	if !containsCandidate(session.Candidates, request.ContentID) {
-		return dto.TallyResponse{}, ungerr.BadRequestError(fmt.Sprintf("content %s is not a session candidate", request.ContentID))
-	}
-	if err := dss.upsertVote(ctx, sessionID, profileID, request.ContentID); err != nil {
+
+	// Session lock + status check + the write all happen inside one
+	// transaction, so a vote can't sneak in after a concurrent Finalize has
+	// already locked and completed this session — the same TOCTOU class
+	// Finalize itself was fixed for.
+	err := dss.transactor.WithinTransaction(ctx, func(ctx context.Context) error {
+		session, err := dss.lockVotingSession(ctx, sessionID, []string{"Candidates"})
+		if err != nil {
+			return err
+		}
+		if session.Method != "majority" {
+			return ungerr.BadRequestError(fmt.Sprintf("session %s is not a majority session", sessionID))
+		}
+		if !containsCandidate(session.Candidates, request.ContentID) {
+			return ungerr.BadRequestError(fmt.Sprintf("content %s is not a session candidate", request.ContentID))
+		}
+		return dss.upsertVote(ctx, sessionID, profileID, request.ContentID)
+	})
+	if err != nil {
 		return dto.TallyResponse{}, err
 	}
 
@@ -548,29 +586,38 @@ func (dss *decisionSessionServiceImpl) SubmitRanking(ctx context.Context, profil
 	ctx, span := otel.Tracer.Start(ctx, "DecisionSessionService.SubmitRanking")
 	defer span.End()
 
-	session, err := dss.loadVotingSession(ctx, sessionID, profileID, []string{"Candidates"})
-	if err != nil {
+	if err := dss.requireParticipant(ctx, sessionID, profileID); err != nil {
 		return dto.TallyResponse{}, err
 	}
-	if session.Method != "ranked" {
-		return dto.TallyResponse{}, ungerr.BadRequestError(fmt.Sprintf("session %s is not a ranked session", sessionID))
-	}
 
-	seen := make(map[uuid.UUID]struct{}, len(request.Ranking))
-	for _, cid := range request.Ranking {
-		if _, dup := seen[cid]; dup {
-			return dto.TallyResponse{}, ungerr.BadRequestError(fmt.Sprintf("ranking has duplicate content %s", cid))
+	// Session lock + status check + validation + the delete-then-reinsert
+	// all happen inside one transaction: the lock prevents a ballot sneaking
+	// in after a concurrent Finalize completes (same TOCTOU class Finalize
+	// itself was fixed for), and it's the same transaction the delete-then-
+	// reinsert already needed for its own atomicity (a successful DeleteMany
+	// followed by a failed InsertMany must not leave the ballot at zero rows).
+	var session entity.DecisionSession
+	err := dss.transactor.WithinTransaction(ctx, func(ctx context.Context) error {
+		var err error
+		session, err = dss.lockVotingSession(ctx, sessionID, []string{"Candidates"})
+		if err != nil {
+			return err
 		}
-		seen[cid] = struct{}{}
-		if !containsCandidate(session.Candidates, cid) {
-			return dto.TallyResponse{}, ungerr.BadRequestError(fmt.Sprintf("content %s is not a session candidate", cid))
+		if session.Method != "ranked" {
+			return ungerr.BadRequestError(fmt.Sprintf("session %s is not a ranked session", sessionID))
 		}
-	}
 
-	// Delete-then-reinsert must be atomic: if InsertMany failed after a
-	// successful DeleteMany with no transaction, the ballot would be wiped
-	// to zero rows instead of either the old or new ballot surviving intact.
-	err = dss.transactor.WithinTransaction(ctx, func(ctx context.Context) error {
+		seen := make(map[uuid.UUID]struct{}, len(request.Ranking))
+		for _, cid := range request.Ranking {
+			if _, dup := seen[cid]; dup {
+				return ungerr.BadRequestError(fmt.Sprintf("ranking has duplicate content %s", cid))
+			}
+			seen[cid] = struct{}{}
+			if !containsCandidate(session.Candidates, cid) {
+				return ungerr.BadRequestError(fmt.Sprintf("content %s is not a session candidate", cid))
+			}
+		}
+
 		existingSpec := crud.Specification[entity.SessionRanking]{}
 		existingSpec.Model.SessionID = sessionID
 		existingSpec.Model.ProfileID = profileID
@@ -607,25 +654,38 @@ func (dss *decisionSessionServiceImpl) Select(ctx context.Context, profileID, se
 	ctx, span := otel.Tracer.Start(ctx, "DecisionSessionService.Select")
 	defer span.End()
 
-	session, err := dss.loadVotingSession(ctx, sessionID, profileID, []string{"Candidates", "Participants"})
-	if err != nil {
+	if err := dss.requireParticipant(ctx, sessionID, profileID); err != nil {
 		return dto.TallyResponse{}, err
-	}
-	if session.Method != "round_robin" {
-		return dto.TallyResponse{}, ungerr.BadRequestError(fmt.Sprintf("session %s is not a round robin session", sessionID))
 	}
 
-	chooser, err := dss.currentChooser(ctx, session)
+	// Session lock + status check + chooser authorization + the write all
+	// happen inside one transaction, so a pick can't sneak in after a
+	// concurrent Finalize has already locked and completed this session —
+	// the same TOCTOU class Finalize itself was fixed for.
+	var session entity.DecisionSession
+	err := dss.transactor.WithinTransaction(ctx, func(ctx context.Context) error {
+		var err error
+		session, err = dss.lockVotingSession(ctx, sessionID, []string{"Candidates", "Participants"})
+		if err != nil {
+			return err
+		}
+		if session.Method != "round_robin" {
+			return ungerr.BadRequestError(fmt.Sprintf("session %s is not a round robin session", sessionID))
+		}
+
+		chooser, err := dss.currentChooser(ctx, session)
+		if err != nil {
+			return err
+		}
+		if chooser == nil || *chooser != profileID {
+			return ungerr.ForbiddenError(fmt.Sprintf("profile %s is not the current chooser for session %s", profileID, sessionID))
+		}
+		if !containsCandidate(session.Candidates, request.ContentID) {
+			return ungerr.BadRequestError(fmt.Sprintf("content %s is not a session candidate", request.ContentID))
+		}
+		return dss.upsertVote(ctx, sessionID, profileID, request.ContentID)
+	})
 	if err != nil {
-		return dto.TallyResponse{}, err
-	}
-	if chooser == nil || *chooser != profileID {
-		return dto.TallyResponse{}, ungerr.ForbiddenError(fmt.Sprintf("profile %s is not the current chooser for session %s", profileID, sessionID))
-	}
-	if !containsCandidate(session.Candidates, request.ContentID) {
-		return dto.TallyResponse{}, ungerr.BadRequestError(fmt.Sprintf("content %s is not a session candidate", request.ContentID))
-	}
-	if err := dss.upsertVote(ctx, sessionID, profileID, request.ContentID); err != nil {
 		return dto.TallyResponse{}, err
 	}
 
@@ -675,24 +735,12 @@ func (dss *decisionSessionServiceImpl) Finalize(ctx context.Context, profileID, 
 	var winnerID uuid.UUID
 
 	err := dss.transactor.WithinTransaction(ctx, func(ctx context.Context) error {
-		// Session load + status check happen inside the transaction, under
-		// ForUpdate, so a concurrent Finalize on the same session blocks
-		// here instead of racing this one to compute-then-overwrite the
-		// winner (TOCTOU double-finalize).
-		sessionSpec := crud.Specification[entity.DecisionSession]{
-			ForUpdate:        true,
-			PreloadRelations: []string{"Participants.Profile", "Candidates.Content"},
-		}
-		sessionSpec.Model.ID = sessionID
-		session, err := dss.decisionSessionRepo.FindFirst(ctx, sessionSpec)
+		// Locked here (ForUpdate), so a concurrent Finalize on the same
+		// session blocks on this same guard instead of racing this one to
+		// compute-then-overwrite the winner (TOCTOU double-finalize).
+		session, err := dss.lockVotingSession(ctx, sessionID, []string{"Participants.Profile", "Candidates.Content"})
 		if err != nil {
 			return err
-		}
-		if session.ID == uuid.Nil {
-			return ungerr.NotFoundError(fmt.Sprintf("session %s is not found", sessionID))
-		}
-		if session.Status != "voting" {
-			return ungerr.ConflictError(fmt.Sprintf("session %s is not open for voting", sessionID))
 		}
 
 		candidateIDs := make([]uuid.UUID, len(session.Candidates))

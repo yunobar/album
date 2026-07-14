@@ -3,6 +3,7 @@ package handler
 import (
 	"net/http"
 	"slices"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -26,6 +27,11 @@ type DecisionSessionHandler struct {
 func NewDecisionSessionHandler(decisionSessionService service.DecisionSessionService, natsConn *nats.Conn) *DecisionSessionHandler {
 	return &DecisionSessionHandler{decisionSessionService, natsConn}
 }
+
+const (
+	pongWait   = 60 * time.Second
+	pingPeriod = (pongWait * 9) / 10
+)
 
 var wsUpgrader = websocket.Upgrader{
 	// WS handshakes get no CORS preflight and the browser WebSocket
@@ -261,6 +267,18 @@ func (dsh *DecisionSessionHandler) HandleLive() gin.HandlerFunc {
 			}
 		}()
 
+		// Keepalive: without this, a connection silently dropped by a NAT
+		// or an idle-timing-out proxy/load balancer between the client and
+		// this server never surfaces as a read/write error, and the read-
+		// pump goroutine below blocks on ReadMessage() forever — a
+		// per-connection leak. The read deadline only advances on a pong,
+		// so a client that stops responding gets disconnected within
+		// pongWait instead of held open indefinitely.
+		_ = conn.SetReadDeadline(time.Now().Add(pongWait))
+		conn.SetPongHandler(func(string) error {
+			return conn.SetReadDeadline(time.Now().Add(pongWait))
+		})
+
 		msgCh := make(chan *nats.Msg, 16)
 		sub, err := dsh.natsConn.ChanSubscribe(pubsub.LiveSubject(sessionID), msgCh)
 		if err != nil {
@@ -274,7 +292,8 @@ func (dsh *DecisionSessionHandler) HandleLive() gin.HandlerFunc {
 
 		// This channel is server -> client only (no client input expected);
 		// a background read loop's only job is detecting when the client
-		// closes the connection, so the write loop below can stop.
+		// closes the connection (or stops responding to pings — see the
+		// read deadline above), so the write loop below can stop.
 		disconnected := make(chan struct{})
 		go func() {
 			defer close(disconnected)
@@ -285,6 +304,12 @@ func (dsh *DecisionSessionHandler) HandleLive() gin.HandlerFunc {
 			}
 		}()
 
+		// pingPeriod must stay well under pongWait so a ping always has
+		// time to round-trip before the read deadline it's meant to refresh
+		// would otherwise expire.
+		ticker := time.NewTicker(pingPeriod)
+		defer ticker.Stop()
+
 		for {
 			select {
 			case <-disconnected:
@@ -294,6 +319,10 @@ func (dsh *DecisionSessionHandler) HandleLive() gin.HandlerFunc {
 					return
 				}
 				if err := conn.WriteMessage(websocket.TextMessage, msg.Data); err != nil {
+					return
+				}
+			case <-ticker.C:
+				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 					return
 				}
 			}

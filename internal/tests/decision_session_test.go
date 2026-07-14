@@ -15,6 +15,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/yunobar/album/internal/core/pubsub"
 	"github.com/yunobar/album/internal/domain/dto"
 	"github.com/yunobar/album/internal/domain/entity"
 	"github.com/yunobar/album/internal/testhelpers"
@@ -64,6 +65,24 @@ func TestDecisionSessionCreate(t *testing.T) {
 		require.Len(t, getResp.Candidates, 2)
 	})
 
+	t.Run("deduplicates repeated participantIds and candidateContentIds instead of erroring", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		bob := seedTestProfile(t, "Bob")
+		group := seedTestGroup(t, nil, testProfileID, bob.ID)
+		content := seedTestContent(t)
+		seedActiveWatchlistItem(t, testProfileID, content.ID)
+
+		resp := postCreateSession(t, group.ID, dto.CreateSessionRequest{
+			Method:              "majority",
+			ParticipantIDs:      []uuid.UUID{testProfileID, testProfileID, bob.ID},
+			CandidateContentIDs: []uuid.UUID{content.ID, content.ID},
+		}, http.StatusCreated)
+
+		require.Len(t, resp.Participants, 2)
+		require.Len(t, resp.Candidates, 1)
+	})
+
 	t.Run("400s when a participantId is not a member of the group", func(t *testing.T) {
 		testhelpers.TruncateAll(t, testDB)
 		seedTestUser(t)
@@ -107,6 +126,25 @@ func TestDecisionSessionCreate(t *testing.T) {
 			ParticipantIDs:      []uuid.UUID{owner.ID},
 			CandidateContentIDs: []uuid.UUID{content.ID},
 		}, http.StatusNotFound)
+	})
+
+	t.Run("400s when the caller (a group member) excludes themselves from participantIds", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		bob := seedTestProfile(t, "Bob")
+		group := seedTestGroup(t, nil, testProfileID, bob.ID)
+		content := seedTestContent(t)
+		seedActiveWatchlistItem(t, bob.ID, content.ID)
+
+		// The caller is a genuine group member (unlike the 404 case above),
+		// so without this validation the create would commit and this same
+		// request's own follow-up Get reload would then 404 the caller on
+		// the session they just made.
+		postCreateSession(t, group.ID, dto.CreateSessionRequest{
+			Method:              "majority",
+			ParticipantIDs:      []uuid.UUID{bob.ID},
+			CandidateContentIDs: []uuid.UUID{content.ID},
+		}, http.StatusBadRequest)
 	})
 
 	t.Run("priority method captures a snapshot per active watchlist match; other methods capture none", func(t *testing.T) {
@@ -865,6 +903,35 @@ func TestDecisionSessionFinalize(t *testing.T) {
 	})
 }
 
+// waitForLiveSubscription blocks until conn has genuinely received a
+// message published on sessionID's live subject, proving the server's
+// ChanSubscribe call has completed — a WS Dial() only confirms the HTTP 101
+// upgrade, which happens earlier in the handler than the subscribe call.
+// Publishes canaries on a short interval via the real NATS connection until
+// one round-trips back, instead of guessing a fixed sleep duration.
+func waitForLiveSubscription(t *testing.T, conn *websocket.Conn, sessionID uuid.UUID) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		require.NoError(t, testNATS.Publish(pubsub.LiveSubject(sessionID), []byte(`{"type":"ready"}`)))
+
+		require.NoError(t, conn.SetReadDeadline(time.Now().Add(100*time.Millisecond)))
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			continue // read timeout — subscription (or the canary) hasn't landed yet
+		}
+
+		var probe struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(data, &probe) == nil && probe.Type == "ready" {
+			return
+		}
+	}
+	t.Fatal("timed out waiting for the WS handler's NATS subscription to become active")
+}
+
 func TestDecisionSessionLive(t *testing.T) {
 	testhelpers.RequireTestDB(t, testDB)
 
@@ -973,11 +1040,12 @@ func TestDecisionSessionLive(t *testing.T) {
 
 		// The Dial call returns once the server has written the HTTP 101
 		// upgrade response, which happens before the handler reaches
-		// ChanSubscribe — give it a moment to actually subscribe before
-		// publishing, or the vote's tally message races the subscription
-		// and is silently missed (this is exactly the "best-effort,
-		// reconnect re-fetches GET" contract the design accepts).
-		time.Sleep(200 * time.Millisecond)
+		// ChanSubscribe — a fixed sleep here would be a flaky guess at how
+		// long that takes. Poll instead: publish canaries on the session's
+		// own subject via the real NATS connection until the WS client
+		// actually receives one, which is only possible once ChanSubscribe
+		// has genuinely completed server-side.
+		waitForLiveSubscription(t, conn, session.ID)
 
 		// Cast a vote over a normal HTTP request on a separate connection.
 		postSessionAction(t, session.ID, "votes", dto.CastVoteRequest{ContentID: content1.ID}, "", http.StatusOK)
