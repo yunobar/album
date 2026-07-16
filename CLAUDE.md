@@ -42,9 +42,19 @@ internal/
 - Clean Architecture: domain layer has no dependency on adapters or framework.
 - All wiring happens in `internal/provider/` — constructors use plain dependency injection (no DI container).
 
+### Repositories
+
+- Query logic lives in `internal/domain/repository/`, never inline in a service via `<repo>.GetGormInstance(ctx)` + raw SQL. Services call repository methods; they don't build queries.
+- go-crud's generic `crud.Repository[T]` + `Specification[T]` covers simple CRUD. When a query doesn't fit that shape (joins across tables, aggregation, anything needing raw SQL), define a custom repository:
+  1. Interface in `internal/domain/repository/<name>_repository.go` that embeds `crud.Repository[entity.X]` and adds the extra method(s), e.g. `GroupRepository` embeds `crud.Repository[entity.Group]` and adds `FindActiveSession(ctx, groupID, profileID) (*ActiveSession, error)`.
+  2. Implementation struct embeds the generic `crud.Repository[entity.X]` (inherits `GetGormInstance(ctx)` for a transaction-aware `*gorm.DB` to run raw queries against) and implements only the extra method(s).
+  3. Constructor `New<Name>Repository(db *gorm.DB) <Name>Repository` wraps `crud.NewRepository[entity.X](db)`.
+- Wire it in `internal/provider/repository_provider.go`: change the `Repositories` field type from `crud.Repository[entity.X]` to the custom interface, and construct via `New<Name>Repository(db)`. Since the custom interface embeds `crud.Repository[entity.X]`, it still satisfies any existing param typed `crud.Repository[entity.X]` — no other call sites need to change.
+
 ### Naming
 
 - Service implementations: `<name>ServiceImpl` struct, `New<Name>Service` constructor.
+- Custom repositories: `<Name>Repository` interface (embeds `crud.Repository[entity.X]`), `<name>RepositoryImpl` struct, `New<Name>Repository` constructor.
 - External API clients: anything that makes requests to a third-party endpoint (HTTP, etc.) is named `<Name>Client` / `<name>_client.go` and lives in `internal/domain/client/`, never `internal/domain/service/`. `<name>Client` struct, `New<Name>Client` constructor. Name the client after the provider (`TMDBClient`, `TurnstileClient`), not the domain concept it serves — services in `service/` consume the client interface for their business logic.
 - Handlers: `<Name>Handler` struct with `Handle<Action>()` methods returning `gin.HandlerFunc`.
 - DTOs: `<Action>Request` / `<Action>Response` in the `dto` package.

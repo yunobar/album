@@ -333,7 +333,7 @@ func TestDecisionSessionService_Create(t *testing.T) {
 	})
 
 	t.Run("rejects a participantId that isn't a group member", func(t *testing.T) {
-		svc, _, _, _, groupMemberRepo, _, _, _, _, _, _ := newTestDecisionSessionService(t)
+		svc, decisionSessionRepo, _, _, groupMemberRepo, _, _, _, _, _, _ := newTestDecisionSessionService(t)
 
 		caller := uuid.New()
 		outsider := uuid.New()
@@ -343,6 +343,12 @@ func TestDecisionSessionService_Create(t *testing.T) {
 				return spec.Model.GroupID == groupID
 			})).
 			Return([]entity.GroupMember{{ProfileID: caller}}, nil)
+
+		decisionSessionRepo.EXPECT().
+			FindFirst(mock.Anything, mock.MatchedBy(func(spec crud.Specification[entity.DecisionSession]) bool {
+				return spec.Model.GroupID == groupID && spec.Model.Status == appconstant.SessionStatusVoting
+			})).
+			Return(entity.DecisionSession{}, nil)
 
 		_, err := svc.Create(context.Background(), caller, groupID, dto.CreateSessionRequest{
 			Method:              "majority",

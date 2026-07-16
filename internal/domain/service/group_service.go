@@ -13,6 +13,7 @@ import (
 	"github.com/yunobar/album/internal/domain/dto"
 	"github.com/yunobar/album/internal/domain/entity"
 	"github.com/yunobar/album/internal/domain/mapper"
+	"github.com/yunobar/album/internal/domain/repository"
 	"gorm.io/gorm/clause"
 )
 
@@ -26,14 +27,14 @@ type GroupService interface {
 
 type groupServiceImpl struct {
 	transactor      crud.Transactor
-	groupRepo       crud.Repository[entity.Group]
+	groupRepo       repository.GroupRepository
 	groupMemberRepo crud.Repository[entity.GroupMember]
 	profileRepo     crud.Repository[entity.UserProfile]
 }
 
 func NewGroupService(
 	transactor crud.Transactor,
-	groupRepo crud.Repository[entity.Group],
+	groupRepo repository.GroupRepository,
 	groupMemberRepo crud.Repository[entity.GroupMember],
 	profileRepo crud.Repository[entity.UserProfile],
 ) GroupService {
@@ -101,7 +102,8 @@ func (gs *groupServiceImpl) Create(ctx context.Context, profileID uuid.UUID, req
 		}
 		member.Profile = profile
 
-		response = mapper.GroupToResponse(group, []entity.GroupMember{member}, profileID)
+		// A brand-new group has no session yet — always null (ADR-0006).
+		response = mapper.GroupToResponse(group, []entity.GroupMember{member}, profileID, nil)
 		return nil
 	})
 
@@ -158,7 +160,9 @@ func (gs *groupServiceImpl) Join(ctx context.Context, profileID uuid.UUID, token
 			return err
 		}
 
-		response = mapper.GroupToResponse(group, members, profileID)
+		// A fresh joiner is in no frozen session_participants set yet —
+		// effectively always null (ADR-0006).
+		response = mapper.GroupToResponse(group, members, profileID, nil)
 		return nil
 	})
 
@@ -179,7 +183,29 @@ func (gs *groupServiceImpl) Get(ctx context.Context, profileID, groupID uuid.UUI
 		return dto.GroupResponse{}, err
 	}
 
-	return mapper.GroupToResponse(membership.Group, members, profileID), nil
+	activeSession, err := gs.activeSessionFor(ctx, groupID, profileID)
+	if err != nil {
+		return dto.GroupResponse{}, err
+	}
+
+	return mapper.GroupToResponse(membership.Group, members, profileID, activeSession), nil
+}
+
+// activeSessionFor is the caller-scoped group→session resolution path
+// (ADR-0006) — see repository.GroupRepository.FindActiveSession for the
+// join. Keeping this caller-scoped is what keeps it consistent with GET
+// /sessions/:id's non-disclosure rule — see decision_session_service.go's
+// requireParticipant.
+func (gs *groupServiceImpl) activeSessionFor(ctx context.Context, groupID, profileID uuid.UUID) (*dto.ActiveSessionResponse, error) {
+	session, err := gs.groupRepo.FindActiveSession(ctx, groupID, profileID)
+	if err != nil {
+		return nil, err
+	}
+	if session == nil {
+		return nil, nil
+	}
+
+	return &dto.ActiveSessionResponse{ID: session.ID, Method: mapper.MethodToAPI(session.Method)}, nil
 }
 
 // requireMembership loads the caller's membership row for groupID, preloaded

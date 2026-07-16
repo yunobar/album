@@ -164,6 +164,10 @@ func TestDecisionSessionCreate(t *testing.T) {
 		require.NoError(t, testDB.Where("session_id = ?", prioritySession.ID).Find(&prioritySnapshots).Error)
 		assert.Len(t, prioritySnapshots, 1, "priority method must freeze one snapshot per on-watchlist candidate")
 
+		// One live session per group (ADR-0006) — finalize before the group
+		// can start a second one.
+		postFinalize(t, prioritySession.ID, "", http.StatusOK)
+
 		majoritySession := postCreateSession(t, group.ID, dto.CreateSessionRequest{
 			Method:              "majority",
 			ParticipantIDs:      []uuid.UUID{testProfileID},
@@ -188,6 +192,9 @@ func TestDecisionSessionCreate(t *testing.T) {
 			CandidateContentIDs: []uuid.UUID{content.ID},
 		}
 		s1 := postCreateSession(t, group.ID, req, http.StatusCreated)
+		// One live session per group (ADR-0006) — finalize before the group
+		// can start a second one.
+		postFinalize(t, s1.ID, "", http.StatusOK)
 		s2 := postCreateSession(t, group.ID, req, http.StatusCreated)
 
 		var seed1, seed2 entity.DecisionSession

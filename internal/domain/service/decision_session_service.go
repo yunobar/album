@@ -5,6 +5,7 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/itsLeonB/go-crud"
 	"github.com/itsLeonB/ungerr"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/yunobar/album/internal/appconstant"
 	"github.com/yunobar/album/internal/core/logger"
 	"github.com/yunobar/album/internal/core/otel"
@@ -21,6 +23,29 @@ import (
 	"github.com/yunobar/album/internal/domain/mapper"
 	"go.opentelemetry.io/otel/trace"
 )
+
+// pgUniqueViolation is Postgres SQLSTATE 23505.
+const pgUniqueViolation = "23505"
+
+// oneLiveSessionPerGroupIndex is the partial unique index name from the
+// one_live_session_per_group migration (ADR-0006) — checked by constraint
+// name so an unrelated unique violation elsewhere doesn't get misreported as
+// "a session is already live".
+const oneLiveSessionPerGroupIndex = "one_live_session_per_group"
+
+// isOneLiveSessionViolation reports whether err is the DB rejecting a second
+// concurrent create for a group that already has a session in "voting" — the
+// index, not an app-level read-then-check, is what makes this race-safe
+// (ADR-0006). go-crud's Insert wraps driver errors in *ungerr.UnknownError,
+// which has no Unwrap(), so errors.As must run on the unwrapped cause rather
+// than the returned err directly.
+func isOneLiveSessionViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(ungerr.Unwrap(err), &pgErr) {
+		return false
+	}
+	return pgErr.Code == pgUniqueViolation && pgErr.ConstraintName == oneLiveSessionPerGroupIndex
+}
 
 type DecisionSessionService interface {
 	Create(ctx context.Context, profileID, groupID uuid.UUID, request dto.CreateSessionRequest) (dto.SessionResponse, error)
@@ -119,6 +144,22 @@ func (dss *decisionSessionServiceImpl) Create(ctx context.Context, profileID, gr
 			return ungerr.NotFoundError(fmt.Sprintf("group %s is not found", groupID))
 		}
 
+		// Cheap pre-check for the common case (a friendly 409 without
+		// tripping the unique index). Not a substitute for the index below —
+		// two concurrent creates can both pass this check before either
+		// commits, so isOneLiveSessionViolation still guards the actual
+		// race (ADR-0006).
+		liveSpec := crud.Specification[entity.DecisionSession]{}
+		liveSpec.Model.GroupID = groupID
+		liveSpec.Model.Status = appconstant.SessionStatusVoting
+		existing, err := dss.decisionSessionRepo.FindFirst(ctx, liveSpec)
+		if err != nil {
+			return err
+		}
+		if existing.ID != uuid.Nil {
+			return ungerr.ConflictError(fmt.Sprintf("group %s already has a session in voting", groupID))
+		}
+
 		isCallerParticipant := false
 		seenParticipants := make(map[uuid.UUID]struct{}, len(request.ParticipantIDs))
 		uniqueParticipantIDs := make([]uuid.UUID, 0, len(request.ParticipantIDs))
@@ -172,10 +213,13 @@ func (dss *decisionSessionServiceImpl) Create(ctx context.Context, profileID, gr
 		session, err := dss.decisionSessionRepo.Insert(ctx, entity.DecisionSession{
 			GroupID:    groupID,
 			Method:     mapper.MethodToDB(request.Method),
-			Status:     "voting",
+			Status:     appconstant.SessionStatusVoting,
 			RandomSeed: seed,
 		})
 		if err != nil {
+			if isOneLiveSessionViolation(err) {
+				return ungerr.ConflictError(fmt.Sprintf("group %s already has a session in voting", groupID))
+			}
 			return err
 		}
 
@@ -440,7 +484,7 @@ func (dss *decisionSessionServiceImpl) lockVotingSession(ctx context.Context, se
 	if session.ID == uuid.Nil {
 		return entity.DecisionSession{}, ungerr.NotFoundError(fmt.Sprintf("session %s is not found", sessionID))
 	}
-	if session.Status != "voting" {
+	if session.Status != appconstant.SessionStatusVoting {
 		return entity.DecisionSession{}, ungerr.ConflictError(fmt.Sprintf("session %s is not open for voting", sessionID))
 	}
 
@@ -816,7 +860,7 @@ func (dss *decisionSessionServiceImpl) Finalize(ctx context.Context, profileID, 
 		}
 
 		session.WinnerContentID = &winnerID
-		session.Status = "completed"
+		session.Status = appconstant.SessionStatusCompleted
 		session.FinalizedAt = &now
 		if _, err := dss.decisionSessionRepo.Update(ctx, session); err != nil {
 			return err

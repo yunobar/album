@@ -20,7 +20,11 @@ func MemberToResponse(profile entity.UserProfile) dto.MemberResponse {
 	}
 }
 
-func GroupToResponse(group entity.Group, members []entity.GroupMember, callerProfileID uuid.UUID) dto.GroupResponse {
+// GroupToResponse takes the caller's activeSession as an already-resolved
+// pointer (nil when there isn't one) rather than deriving it — matches every
+// other mapper in this codebase being pure/stateless; the caller-scoped DB
+// lookup belongs in the service (ADR-0006).
+func GroupToResponse(group entity.Group, members []entity.GroupMember, callerProfileID uuid.UUID, activeSession *dto.ActiveSessionResponse) dto.GroupResponse {
 	return dto.GroupResponse{
 		BaseDTO:     BaseToDTO(group.BaseEntity),
 		Name:        resolveGroupName(group, members, callerProfileID),
@@ -28,6 +32,7 @@ func GroupToResponse(group entity.Group, members []entity.GroupMember, callerPro
 		Members: ezutil.MapSlice(members, func(m entity.GroupMember) dto.MemberResponse {
 			return MemberToResponse(m.Profile)
 		}),
+		ActiveSession: activeSession,
 	}
 }
 

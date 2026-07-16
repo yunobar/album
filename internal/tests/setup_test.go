@@ -19,6 +19,7 @@ import (
 	"github.com/yunobar/album/internal/core/pubsub"
 	"github.com/yunobar/album/internal/domain/dto"
 	"github.com/yunobar/album/internal/domain/entity"
+	"github.com/yunobar/album/internal/domain/repository"
 	"github.com/yunobar/album/internal/domain/service"
 	"github.com/yunobar/album/internal/testhelpers"
 	"gorm.io/gorm"
@@ -108,7 +109,7 @@ func registerTestRoutes(r *gin.Engine, db *gorm.DB) {
 	// Services
 	profileSvc := service.NewProfileService(transactor, profileRepo, userRepo)
 	watchlistSvc := service.NewWatchlistService(transactor, crud.NewRepository[entity.WatchlistItem](db), crud.NewRepository[entity.Content](db))
-	groupSvc := service.NewGroupService(transactor, crud.NewRepository[entity.Group](db), crud.NewRepository[entity.GroupMember](db), profileRepo)
+	groupSvc := service.NewGroupService(transactor, repository.NewGroupRepository(db), crud.NewRepository[entity.GroupMember](db), profileRepo)
 	decisionSessionSvc := service.NewDecisionSessionService(
 		transactor,
 		crud.NewRepository[entity.DecisionSession](db),

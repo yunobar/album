@@ -7,6 +7,16 @@ const (
 	PriorityLow    = "low"
 )
 
+// Decision session statuses — mirrors the decision_sessions.status check
+// constraint. A session is always created straight into Voting; Open exists
+// in the DB constraint but is never produced by this API.
+const (
+	SessionStatusOpen      = "open"
+	SessionStatusVoting    = "voting"
+	SessionStatusCompleted = "completed"
+	SessionStatusCancelled = "cancelled"
+)
+
 // PriorityWeights maps a watchlist priority to its Priority-Based decision
 // weight. A candidate absent from session_priority_snapshots (not on a
 // participant's active watchlist at session creation) gets weight 0 — that
