@@ -116,7 +116,7 @@ func registerTestRoutes(r *gin.Engine, db *gorm.DB) {
 		crud.NewRepository[entity.SessionParticipant](db),
 		crud.NewRepository[entity.SessionCandidate](db),
 		crud.NewRepository[entity.GroupMember](db),
-		crud.NewRepository[entity.Group](db),
+		repository.NewGroupRepository(db),
 		crud.NewRepository[entity.WatchlistItem](db),
 		crud.NewRepository[entity.SessionPrioritySnapshot](db),
 		crud.NewRepository[entity.SessionVote](db),

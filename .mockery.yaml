@@ -39,6 +39,11 @@ packages:
       WatchlistService:
         config:
           all: true
+  github.com/yunobar/album/internal/domain/repository:
+    interfaces:
+      GroupRepository:
+        config:
+          all: true
   github.com/yunobar/album/internal/domain/client:
     interfaces:
       TMDBClient:

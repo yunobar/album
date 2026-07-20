@@ -74,7 +74,7 @@ type MockTMDBClient_Search_Call struct {
 // Search is a helper method to define mock.On call
 //   - ctx context.Context
 //   - query string
-func (_e *MockTMDBClient_Expecter) Search(ctx interface{}, query interface{}) *MockTMDBClient_Search_Call {
+func (_e *MockTMDBClient_Expecter) Search(ctx any, query any) *MockTMDBClient_Search_Call {
 	return &MockTMDBClient_Search_Call{Call: _e.mock.On("Search", ctx, query)}
 }
 

@@ -22,6 +22,11 @@ type GroupRepository interface {
 	// nil rather than learning the session exists. Returns nil, nil when
 	// there's no match.
 	FindActiveSession(ctx context.Context, groupID, profileID uuid.UUID) (*ActiveSession, error)
+	// FindMergedContentIDs returns the DISTINCT content IDs actively
+	// watchlisted by any member of the group — the candidate universe a
+	// decision session may draw from. Just the id set, no aggregation (cf.
+	// the fuller GetMergedWatchlist projection).
+	FindMergedContentIDs(ctx context.Context, groupID uuid.UUID) ([]uuid.UUID, error)
 }
 
 // ActiveSession is FindActiveSession's result — a frozen subset of
@@ -64,4 +69,24 @@ func (gr *groupRepositoryImpl) FindActiveSession(ctx context.Context, groupID, p
 	}
 
 	return &row, nil
+}
+
+func (gr *groupRepositoryImpl) FindMergedContentIDs(ctx context.Context, groupID uuid.UUID) ([]uuid.UUID, error) {
+	db, err := gr.GetGormInstance(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var ids []uuid.UUID
+	err = db.Raw(`
+		SELECT DISTINCT wi.content_id
+		FROM group_members gm
+		JOIN watchlist_items wi ON wi.profile_id = gm.profile_id AND wi.status = ?
+		WHERE gm.group_id = ?
+	`, appconstant.WatchlistStatusActive, groupID).Scan(&ids).Error
+	if err != nil {
+		return nil, ungerr.Wrap(err, "error querying merged watchlist content ids")
+	}
+
+	return ids, nil
 }

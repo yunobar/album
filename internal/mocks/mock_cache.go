@@ -48,7 +48,7 @@ type MockCache_Delete_Call[T any] struct {
 
 // Delete is a helper method to define mock.On call
 //   - key string
-func (_e *MockCache_Expecter[T]) Delete(key interface{}) *MockCache_Delete_Call[T] {
+func (_e *MockCache_Expecter[T]) Delete(key any) *MockCache_Delete_Call[T] {
 	return &MockCache_Delete_Call[T]{Call: _e.mock.On("Delete", key)}
 }
 
@@ -111,7 +111,7 @@ type MockCache_Get_Call[T any] struct {
 // Get is a helper method to define mock.On call
 //   - key string
 //   - fallbackFunc func(string) (T, bool)
-func (_e *MockCache_Expecter[T]) Get(key interface{}, fallbackFunc interface{}) *MockCache_Get_Call[T] {
+func (_e *MockCache_Expecter[T]) Get(key any, fallbackFunc any) *MockCache_Get_Call[T] {
 	return &MockCache_Get_Call[T]{Call: _e.mock.On("Get", key, fallbackFunc)}
 }
 

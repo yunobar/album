@@ -124,9 +124,9 @@ type MockKeyValue_Create_Call struct {
 //   - key string
 //   - value []byte
 //   - opts ...jetstream.KVCreateOpt
-func (_e *MockKeyValue_Expecter) Create(ctx interface{}, key interface{}, value interface{}, opts ...interface{}) *MockKeyValue_Create_Call {
+func (_e *MockKeyValue_Expecter) Create(ctx any, key any, value any, opts ...any) *MockKeyValue_Create_Call {
 	return &MockKeyValue_Create_Call{Call: _e.mock.On("Create",
-		append([]interface{}{ctx, key, value}, opts...)...)}
+		append([]any{ctx, key, value}, opts...)...)}
 }
 
 func (_c *MockKeyValue_Create_Call) Run(run func(ctx context.Context, key string, value []byte, opts ...jetstream.KVCreateOpt)) *MockKeyValue_Create_Call {
@@ -201,9 +201,9 @@ type MockKeyValue_Delete_Call struct {
 //   - ctx context.Context
 //   - key string
 //   - opts ...jetstream.KVDeleteOpt
-func (_e *MockKeyValue_Expecter) Delete(ctx interface{}, key interface{}, opts ...interface{}) *MockKeyValue_Delete_Call {
+func (_e *MockKeyValue_Expecter) Delete(ctx any, key any, opts ...any) *MockKeyValue_Delete_Call {
 	return &MockKeyValue_Delete_Call{Call: _e.mock.On("Delete",
-		append([]interface{}{ctx, key}, opts...)...)}
+		append([]any{ctx, key}, opts...)...)}
 }
 
 func (_c *MockKeyValue_Delete_Call) Run(run func(ctx context.Context, key string, opts ...jetstream.KVDeleteOpt)) *MockKeyValue_Delete_Call {
@@ -277,7 +277,7 @@ type MockKeyValue_Get_Call struct {
 // Get is a helper method to define mock.On call
 //   - ctx context.Context
 //   - key string
-func (_e *MockKeyValue_Expecter) Get(ctx interface{}, key interface{}) *MockKeyValue_Get_Call {
+func (_e *MockKeyValue_Expecter) Get(ctx any, key any) *MockKeyValue_Get_Call {
 	return &MockKeyValue_Get_Call{Call: _e.mock.On("Get", ctx, key)}
 }
 
@@ -346,7 +346,7 @@ type MockKeyValue_GetRevision_Call struct {
 //   - ctx context.Context
 //   - key string
 //   - revision uint64
-func (_e *MockKeyValue_Expecter) GetRevision(ctx interface{}, key interface{}, revision interface{}) *MockKeyValue_GetRevision_Call {
+func (_e *MockKeyValue_Expecter) GetRevision(ctx any, key any, revision any) *MockKeyValue_GetRevision_Call {
 	return &MockKeyValue_GetRevision_Call{Call: _e.mock.On("GetRevision", ctx, key, revision)}
 }
 
@@ -426,9 +426,9 @@ type MockKeyValue_History_Call struct {
 //   - ctx context.Context
 //   - key string
 //   - opts ...jetstream.WatchOpt
-func (_e *MockKeyValue_Expecter) History(ctx interface{}, key interface{}, opts ...interface{}) *MockKeyValue_History_Call {
+func (_e *MockKeyValue_Expecter) History(ctx any, key any, opts ...any) *MockKeyValue_History_Call {
 	return &MockKeyValue_History_Call{Call: _e.mock.On("History",
-		append([]interface{}{ctx, key}, opts...)...)}
+		append([]any{ctx, key}, opts...)...)}
 }
 
 func (_c *MockKeyValue_History_Call) Run(run func(ctx context.Context, key string, opts ...jetstream.WatchOpt)) *MockKeyValue_History_Call {
@@ -508,9 +508,9 @@ type MockKeyValue_Keys_Call struct {
 // Keys is a helper method to define mock.On call
 //   - ctx context.Context
 //   - opts ...jetstream.WatchOpt
-func (_e *MockKeyValue_Expecter) Keys(ctx interface{}, opts ...interface{}) *MockKeyValue_Keys_Call {
+func (_e *MockKeyValue_Expecter) Keys(ctx any, opts ...any) *MockKeyValue_Keys_Call {
 	return &MockKeyValue_Keys_Call{Call: _e.mock.On("Keys",
-		append([]interface{}{ctx}, opts...)...)}
+		append([]any{ctx}, opts...)...)}
 }
 
 func (_c *MockKeyValue_Keys_Call) Run(run func(ctx context.Context, opts ...jetstream.WatchOpt)) *MockKeyValue_Keys_Call {
@@ -585,9 +585,9 @@ type MockKeyValue_ListKeys_Call struct {
 // ListKeys is a helper method to define mock.On call
 //   - ctx context.Context
 //   - opts ...jetstream.WatchOpt
-func (_e *MockKeyValue_Expecter) ListKeys(ctx interface{}, opts ...interface{}) *MockKeyValue_ListKeys_Call {
+func (_e *MockKeyValue_Expecter) ListKeys(ctx any, opts ...any) *MockKeyValue_ListKeys_Call {
 	return &MockKeyValue_ListKeys_Call{Call: _e.mock.On("ListKeys",
-		append([]interface{}{ctx}, opts...)...)}
+		append([]any{ctx}, opts...)...)}
 }
 
 func (_c *MockKeyValue_ListKeys_Call) Run(run func(ctx context.Context, opts ...jetstream.WatchOpt)) *MockKeyValue_ListKeys_Call {
@@ -662,9 +662,9 @@ type MockKeyValue_ListKeysFiltered_Call struct {
 // ListKeysFiltered is a helper method to define mock.On call
 //   - ctx context.Context
 //   - filters ...string
-func (_e *MockKeyValue_Expecter) ListKeysFiltered(ctx interface{}, filters ...interface{}) *MockKeyValue_ListKeysFiltered_Call {
+func (_e *MockKeyValue_Expecter) ListKeysFiltered(ctx any, filters ...any) *MockKeyValue_ListKeysFiltered_Call {
 	return &MockKeyValue_ListKeysFiltered_Call{Call: _e.mock.On("ListKeysFiltered",
-		append([]interface{}{ctx}, filters...)...)}
+		append([]any{ctx}, filters...)...)}
 }
 
 func (_c *MockKeyValue_ListKeysFiltered_Call) Run(run func(ctx context.Context, filters ...string)) *MockKeyValue_ListKeysFiltered_Call {
@@ -729,9 +729,9 @@ type MockKeyValue_Purge_Call struct {
 //   - ctx context.Context
 //   - key string
 //   - opts ...jetstream.KVDeleteOpt
-func (_e *MockKeyValue_Expecter) Purge(ctx interface{}, key interface{}, opts ...interface{}) *MockKeyValue_Purge_Call {
+func (_e *MockKeyValue_Expecter) Purge(ctx any, key any, opts ...any) *MockKeyValue_Purge_Call {
 	return &MockKeyValue_Purge_Call{Call: _e.mock.On("Purge",
-		append([]interface{}{ctx, key}, opts...)...)}
+		append([]any{ctx, key}, opts...)...)}
 }
 
 func (_c *MockKeyValue_Purge_Call) Run(run func(ctx context.Context, key string, opts ...jetstream.KVDeleteOpt)) *MockKeyValue_Purge_Call {
@@ -800,9 +800,9 @@ type MockKeyValue_PurgeDeletes_Call struct {
 // PurgeDeletes is a helper method to define mock.On call
 //   - ctx context.Context
 //   - opts ...jetstream.KVPurgeOpt
-func (_e *MockKeyValue_Expecter) PurgeDeletes(ctx interface{}, opts ...interface{}) *MockKeyValue_PurgeDeletes_Call {
+func (_e *MockKeyValue_Expecter) PurgeDeletes(ctx any, opts ...any) *MockKeyValue_PurgeDeletes_Call {
 	return &MockKeyValue_PurgeDeletes_Call{Call: _e.mock.On("PurgeDeletes",
-		append([]interface{}{ctx}, opts...)...)}
+		append([]any{ctx}, opts...)...)}
 }
 
 func (_c *MockKeyValue_PurgeDeletes_Call) Run(run func(ctx context.Context, opts ...jetstream.KVPurgeOpt)) *MockKeyValue_PurgeDeletes_Call {
@@ -870,7 +870,7 @@ type MockKeyValue_Put_Call struct {
 //   - ctx context.Context
 //   - key string
 //   - value []byte
-func (_e *MockKeyValue_Expecter) Put(ctx interface{}, key interface{}, value interface{}) *MockKeyValue_Put_Call {
+func (_e *MockKeyValue_Expecter) Put(ctx any, key any, value any) *MockKeyValue_Put_Call {
 	return &MockKeyValue_Put_Call{Call: _e.mock.On("Put", ctx, key, value)}
 }
 
@@ -942,7 +942,7 @@ type MockKeyValue_PutString_Call struct {
 //   - ctx context.Context
 //   - key string
 //   - value string
-func (_e *MockKeyValue_Expecter) PutString(ctx interface{}, key interface{}, value interface{}) *MockKeyValue_PutString_Call {
+func (_e *MockKeyValue_Expecter) PutString(ctx any, key any, value any) *MockKeyValue_PutString_Call {
 	return &MockKeyValue_PutString_Call{Call: _e.mock.On("PutString", ctx, key, value)}
 }
 
@@ -1014,7 +1014,7 @@ type MockKeyValue_Status_Call struct {
 
 // Status is a helper method to define mock.On call
 //   - ctx context.Context
-func (_e *MockKeyValue_Expecter) Status(ctx interface{}) *MockKeyValue_Status_Call {
+func (_e *MockKeyValue_Expecter) Status(ctx any) *MockKeyValue_Status_Call {
 	return &MockKeyValue_Status_Call{Call: _e.mock.On("Status", ctx)}
 }
 
@@ -1077,7 +1077,7 @@ type MockKeyValue_Update_Call struct {
 //   - key string
 //   - value []byte
 //   - revision uint64
-func (_e *MockKeyValue_Expecter) Update(ctx interface{}, key interface{}, value interface{}, revision interface{}) *MockKeyValue_Update_Call {
+func (_e *MockKeyValue_Expecter) Update(ctx any, key any, value any, revision any) *MockKeyValue_Update_Call {
 	return &MockKeyValue_Update_Call{Call: _e.mock.On("Update", ctx, key, value, revision)}
 }
 
@@ -1162,9 +1162,9 @@ type MockKeyValue_Watch_Call struct {
 //   - ctx context.Context
 //   - keys string
 //   - opts ...jetstream.WatchOpt
-func (_e *MockKeyValue_Expecter) Watch(ctx interface{}, keys interface{}, opts ...interface{}) *MockKeyValue_Watch_Call {
+func (_e *MockKeyValue_Expecter) Watch(ctx any, keys any, opts ...any) *MockKeyValue_Watch_Call {
 	return &MockKeyValue_Watch_Call{Call: _e.mock.On("Watch",
-		append([]interface{}{ctx, keys}, opts...)...)}
+		append([]any{ctx, keys}, opts...)...)}
 }
 
 func (_c *MockKeyValue_Watch_Call) Run(run func(ctx context.Context, keys string, opts ...jetstream.WatchOpt)) *MockKeyValue_Watch_Call {
@@ -1244,9 +1244,9 @@ type MockKeyValue_WatchAll_Call struct {
 // WatchAll is a helper method to define mock.On call
 //   - ctx context.Context
 //   - opts ...jetstream.WatchOpt
-func (_e *MockKeyValue_Expecter) WatchAll(ctx interface{}, opts ...interface{}) *MockKeyValue_WatchAll_Call {
+func (_e *MockKeyValue_Expecter) WatchAll(ctx any, opts ...any) *MockKeyValue_WatchAll_Call {
 	return &MockKeyValue_WatchAll_Call{Call: _e.mock.On("WatchAll",
-		append([]interface{}{ctx}, opts...)...)}
+		append([]any{ctx}, opts...)...)}
 }
 
 func (_c *MockKeyValue_WatchAll_Call) Run(run func(ctx context.Context, opts ...jetstream.WatchOpt)) *MockKeyValue_WatchAll_Call {
@@ -1322,9 +1322,9 @@ type MockKeyValue_WatchFiltered_Call struct {
 //   - ctx context.Context
 //   - keys []string
 //   - opts ...jetstream.WatchOpt
-func (_e *MockKeyValue_Expecter) WatchFiltered(ctx interface{}, keys interface{}, opts ...interface{}) *MockKeyValue_WatchFiltered_Call {
+func (_e *MockKeyValue_Expecter) WatchFiltered(ctx any, keys any, opts ...any) *MockKeyValue_WatchFiltered_Call {
 	return &MockKeyValue_WatchFiltered_Call{Call: _e.mock.On("WatchFiltered",
-		append([]interface{}{ctx, keys}, opts...)...)}
+		append([]any{ctx, keys}, opts...)...)}
 }
 
 func (_c *MockKeyValue_WatchFiltered_Call) Run(run func(ctx context.Context, keys []string, opts ...jetstream.WatchOpt)) *MockKeyValue_WatchFiltered_Call {

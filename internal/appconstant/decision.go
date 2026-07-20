@@ -17,6 +17,17 @@ const (
 	SessionStatusCancelled = "cancelled"
 )
 
+// Decision session methods — mirrors the decision_sessions.method check
+// constraint and the DB enum values (round_robin is snake_case in the DB;
+// mapper.MethodToDB/MethodToAPI translate to/from the API's roundRobin).
+const (
+	SessionMethodMajority   = "majority"
+	SessionMethodRanked     = "ranked"
+	SessionMethodPriority   = "priority"
+	SessionMethodRoundRobin = "round_robin"
+	SessionMethodRandom     = "random"
+)
+
 // PriorityWeights maps a watchlist priority to its Priority-Based decision
 // weight. A candidate absent from session_priority_snapshots (not on a
 // participant's active watchlist at session creation) gets weight 0 — that

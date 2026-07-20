@@ -3,6 +3,7 @@ package mapper
 import (
 	"github.com/google/uuid"
 	"github.com/itsLeonB/ezutil/v2"
+	"github.com/yunobar/album/internal/appconstant"
 	"github.com/yunobar/album/internal/domain/dto"
 	"github.com/yunobar/album/internal/domain/entity"
 )
@@ -13,14 +14,14 @@ import (
 // create.
 func MethodToDB(apiMethod string) string {
 	if apiMethod == "roundRobin" {
-		return "round_robin"
+		return appconstant.SessionMethodRoundRobin
 	}
 	return apiMethod
 }
 
 // MethodToAPI is MethodToDB's inverse.
 func MethodToAPI(dbMethod string) string {
-	if dbMethod == "round_robin" {
+	if dbMethod == appconstant.SessionMethodRoundRobin {
 		return "roundRobin"
 	}
 	return dbMethod

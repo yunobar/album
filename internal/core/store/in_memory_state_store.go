@@ -56,9 +56,7 @@ func (vss *inMemoryStateStore) VerifyAndDelete(ctx context.Context, state string
 }
 
 func (vss *inMemoryStateStore) startCleanup() {
-	vss.wg.Add(1)
-	go func() {
-		defer vss.wg.Done()
+	vss.wg.Go(func() {
 		ticker := time.NewTicker(1 * time.Minute)
 		defer ticker.Stop()
 
@@ -70,7 +68,7 @@ func (vss *inMemoryStateStore) startCleanup() {
 				return
 			}
 		}
-	}()
+	})
 }
 
 func (vss *inMemoryStateStore) cleanup() {

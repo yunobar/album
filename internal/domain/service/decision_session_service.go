@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,6 +20,8 @@ import (
 	"github.com/yunobar/album/internal/domain/dto"
 	"github.com/yunobar/album/internal/domain/entity"
 	"github.com/yunobar/album/internal/domain/mapper"
+	"github.com/yunobar/album/internal/domain/repository"
+	"github.com/yunobar/album/internal/domain/service/decisionmethod"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -50,12 +51,6 @@ func isOneLiveSessionViolation(err error) bool {
 type DecisionSessionService interface {
 	Create(ctx context.Context, profileID, groupID uuid.UUID, request dto.CreateSessionRequest) (dto.SessionResponse, error)
 	Get(ctx context.Context, profileID, sessionID uuid.UUID) (dto.SessionResponse, error)
-	// CapturePrioritySnapshots freezes each participant's current watchlist
-	// priority for every candidate they have actively watchlisted, at
-	// session-creation time. A participant with no active watchlist_items
-	// row for a candidate gets no snapshot row — the Priority-Based
-	// resolver (Task 4) treats a missing row as weight 0.
-	CapturePrioritySnapshots(ctx context.Context, sessionID uuid.UUID, participantIDs, candidateIDs []uuid.UUID) error
 	CastVote(ctx context.Context, profileID, sessionID uuid.UUID, request dto.CastVoteRequest) (dto.TallyResponse, error)
 	SubmitRanking(ctx context.Context, profileID, sessionID uuid.UUID, request dto.SubmitRankingRequest) (dto.TallyResponse, error)
 	// Select is Round Robin's chooser pick — reuses CastVoteRequest's
@@ -82,12 +77,12 @@ type decisionSessionServiceImpl struct {
 	sessionParticipantRepo      crud.Repository[entity.SessionParticipant]
 	sessionCandidateRepo        crud.Repository[entity.SessionCandidate]
 	groupMemberRepo             crud.Repository[entity.GroupMember]
-	groupRepo                   crud.Repository[entity.Group]
-	watchlistRepo               crud.Repository[entity.WatchlistItem]
+	groupRepo                   repository.GroupRepository
 	sessionPrioritySnapshotRepo crud.Repository[entity.SessionPrioritySnapshot]
 	sessionVoteRepo             crud.Repository[entity.SessionVote]
 	sessionRankingRepo          crud.Repository[entity.SessionRanking]
 	publisher                   pubsub.Publisher
+	strategies                  map[string]decisionmethod.Strategy
 }
 
 func NewDecisionSessionService(
@@ -96,7 +91,7 @@ func NewDecisionSessionService(
 	sessionParticipantRepo crud.Repository[entity.SessionParticipant],
 	sessionCandidateRepo crud.Repository[entity.SessionCandidate],
 	groupMemberRepo crud.Repository[entity.GroupMember],
-	groupRepo crud.Repository[entity.Group],
+	groupRepo repository.GroupRepository,
 	watchlistRepo crud.Repository[entity.WatchlistItem],
 	sessionPrioritySnapshotRepo crud.Repository[entity.SessionPrioritySnapshot],
 	sessionVoteRepo crud.Repository[entity.SessionVote],
@@ -110,11 +105,18 @@ func NewDecisionSessionService(
 		sessionCandidateRepo,
 		groupMemberRepo,
 		groupRepo,
-		watchlistRepo,
 		sessionPrioritySnapshotRepo,
 		sessionVoteRepo,
 		sessionRankingRepo,
 		publisher,
+		decisionmethod.NewRegistry(
+			groupRepo,
+			groupMemberRepo,
+			watchlistRepo,
+			sessionVoteRepo,
+			sessionRankingRepo,
+			sessionPrioritySnapshotRepo,
+		),
 	}
 }
 
@@ -239,10 +241,8 @@ func (dss *decisionSessionServiceImpl) Create(ctx context.Context, profileID, gr
 			return err
 		}
 
-		if session.Method == "priority" {
-			if err := dss.CapturePrioritySnapshots(ctx, session.ID, request.ParticipantIDs, request.CandidateContentIDs); err != nil {
-				return err
-			}
+		if err := dss.strategies[session.Method].OnCreate(ctx, session, request.ParticipantIDs, request.CandidateContentIDs); err != nil {
+			return err
 		}
 
 		sessionID = session.ID
@@ -258,23 +258,13 @@ func (dss *decisionSessionServiceImpl) Create(ctx context.Context, profileID, gr
 	return dss.Get(ctx, profileID, sessionID)
 }
 
-// mergedContentIDs is the subset of GetMergedWatchlist's raw SQL needed here
-// — just the distinct content IDs, no aggregation.
+// mergedContentIDs is the candidate universe for a session — the DISTINCT
+// content actively watchlisted by any group member — as a lookup set for
+// candidate validation. The query lives in GroupRepository.
 func (dss *decisionSessionServiceImpl) mergedContentIDs(ctx context.Context, groupID uuid.UUID) (map[uuid.UUID]struct{}, error) {
-	db, err := dss.watchlistRepo.GetGormInstance(ctx)
+	ids, err := dss.groupRepo.FindMergedContentIDs(ctx, groupID)
 	if err != nil {
 		return nil, err
-	}
-
-	var ids []uuid.UUID
-	err = db.Raw(`
-		SELECT DISTINCT wi.content_id
-		FROM group_members gm
-		JOIN watchlist_items wi ON wi.profile_id = gm.profile_id AND wi.status = ?
-		WHERE gm.group_id = ?
-	`, appconstant.WatchlistStatusActive, groupID).Scan(&ids).Error
-	if err != nil {
-		return nil, ungerr.Wrap(err, "error querying merged watchlist content ids")
 	}
 
 	set := make(map[uuid.UUID]struct{}, len(ids))
@@ -319,128 +309,19 @@ func (dss *decisionSessionServiceImpl) Get(ctx context.Context, profileID, sessi
 		return dto.SessionResponse{}, ungerr.NotFoundError(fmt.Sprintf("session %s is not found", sessionID))
 	}
 
-	var chooser *uuid.UUID
-	var tally any
+	strat := dss.strategies[session.Method]
 
-	switch session.Method {
-	case "majority":
-		t, err := dss.majorityTally(ctx, session.ID)
-		if err != nil {
-			return dto.SessionResponse{}, err
-		}
-		tally = t
-	case "ranked":
-		t, err := dss.rankedTally(ctx, session)
-		if err != nil {
-			return dto.SessionResponse{}, err
-		}
-		tally = t
-	case "round_robin":
-		chooser, err = dss.currentChooser(ctx, session)
-		if err != nil {
-			return dto.SessionResponse{}, err
-		}
-		t, err := dss.selectionTally(ctx, session)
-		if err != nil {
-			return dto.SessionResponse{}, err
-		}
-		tally = t
+	chooser, err := strat.Chooser(ctx, session)
+	if err != nil {
+		return dto.SessionResponse{}, err
+	}
+
+	tally, err := strat.Tally(ctx, session)
+	if err != nil {
+		return dto.SessionResponse{}, err
 	}
 
 	return mapper.SessionToResponse(session, chooser, tally), nil
-}
-
-// currentChooser is Round Robin only — Random has no chooser concept and
-// this is never called for method == "random". Duplicates
-// group_service.go's membersOf join-order idiom rather than exporting it
-// from GroupService — deliberate, matching this codebase's established
-// pattern of each service depending only on repos, never on other services.
-func (dss *decisionSessionServiceImpl) currentChooser(ctx context.Context, session entity.DecisionSession) (*uuid.UUID, error) {
-	memberSpec := crud.Specification[entity.GroupMember]{}
-	memberSpec.Model.GroupID = session.GroupID
-	members, err := dss.groupMemberRepo.FindAll(ctx, memberSpec)
-	if err != nil {
-		return nil, err
-	}
-
-	groupSpec := crud.Specification[entity.Group]{}
-	groupSpec.Model.ID = session.GroupID
-	group, err := dss.groupRepo.FindFirst(ctx, groupSpec)
-	if err != nil {
-		return nil, err
-	}
-
-	return chooserFromGroup(group, members, session.Participants), nil
-}
-
-// chooserFromGroup picks the current chooser from an already-loaded
-// group's RoundRobinPointer. Pure — callers are responsible for fetching
-// group and members with whatever locking their context requires.
-func chooserFromGroup(group entity.Group, members []entity.GroupMember, participants []entity.SessionParticipant) *uuid.UUID {
-	sort.Slice(members, func(i, j int) bool {
-		return members[i].ID.String() < members[j].ID.String()
-	})
-
-	participantIDs := make(map[uuid.UUID]struct{}, len(participants))
-	for _, p := range participants {
-		participantIDs[p.ProfileID] = struct{}{}
-	}
-
-	var ordered []uuid.UUID
-	for _, m := range members {
-		if _, ok := participantIDs[m.ProfileID]; ok {
-			ordered = append(ordered, m.ProfileID)
-		}
-	}
-	if len(ordered) == 0 {
-		return nil
-	}
-
-	chooser := ordered[group.RoundRobinPointer%len(ordered)]
-	return &chooser
-}
-
-func (dss *decisionSessionServiceImpl) CapturePrioritySnapshots(ctx context.Context, sessionID uuid.UUID, participantIDs, candidateIDs []uuid.UUID) error {
-	ctx, span := otel.Tracer.Start(ctx, "DecisionSessionService.CapturePrioritySnapshots")
-	defer span.End()
-
-	candidateSet := make(map[uuid.UUID]struct{}, len(candidateIDs))
-	for _, id := range candidateIDs {
-		candidateSet[id] = struct{}{}
-	}
-
-	var snapshots []entity.SessionPrioritySnapshot
-
-	for _, profileID := range participantIDs {
-		spec := crud.Specification[entity.WatchlistItem]{}
-		spec.Model.ProfileID = profileID
-		spec.Model.Status = appconstant.WatchlistStatusActive
-
-		items, err := dss.watchlistRepo.FindAll(ctx, spec)
-		if err != nil {
-			return err
-		}
-
-		for _, item := range items {
-			if _, ok := candidateSet[item.ContentID]; !ok {
-				continue
-			}
-
-			snapshots = append(snapshots, entity.SessionPrioritySnapshot{
-				SessionID: sessionID,
-				ProfileID: profileID,
-				ContentID: item.ContentID,
-				Priority:  item.Priority,
-			})
-		}
-	}
-
-	if len(snapshots) == 0 {
-		return nil
-	}
-
-	_, err := dss.sessionPrioritySnapshotRepo.InsertMany(ctx, snapshots)
-	return err
 }
 
 // requireParticipant returns the same NotFoundError whether the session
@@ -521,74 +402,6 @@ func (dss *decisionSessionServiceImpl) upsertVote(ctx context.Context, sessionID
 	return err
 }
 
-func (dss *decisionSessionServiceImpl) majorityTally(ctx context.Context, sessionID uuid.UUID) (dto.CountsTally, error) {
-	spec := crud.Specification[entity.SessionVote]{}
-	spec.Model.SessionID = sessionID
-	votes, err := dss.sessionVoteRepo.FindAll(ctx, spec)
-	if err != nil {
-		return dto.CountsTally{}, err
-	}
-
-	counts := make(map[string]int)
-	for _, v := range votes {
-		counts[v.ContentID.String()]++
-	}
-	return dto.CountsTally{Counts: counts}, nil
-}
-
-// rankedTally is a raw first-preference snapshot, not an IRV simulation —
-// see this task's "Design decisions" note on why round/eliminations are
-// finalize-only (Task 4).
-func (dss *decisionSessionServiceImpl) rankedTally(ctx context.Context, session entity.DecisionSession) (dto.RankedTally, error) {
-	spec := crud.Specification[entity.SessionRanking]{}
-	spec.Model.SessionID = session.ID
-	rankings, err := dss.sessionRankingRepo.FindAll(ctx, spec)
-	if err != nil {
-		return dto.RankedTally{}, err
-	}
-
-	counts := make(map[string]int)
-	for _, r := range rankings {
-		if r.Rank == 1 {
-			counts[r.ContentID.String()]++
-		}
-	}
-
-	activeCandidateIDs := make([]uuid.UUID, len(session.Candidates))
-	for i, c := range session.Candidates {
-		activeCandidateIDs[i] = c.ContentID
-	}
-
-	return dto.RankedTally{
-		Round:                  1,
-		ActiveCandidateIDs:     activeCandidateIDs,
-		EliminatedCandidateIDs: []uuid.UUID{},
-		Counts:                 counts,
-	}, nil
-}
-
-func (dss *decisionSessionServiceImpl) selectionTally(ctx context.Context, session entity.DecisionSession) (dto.SelectionTally, error) {
-	chooser, err := dss.currentChooser(ctx, session)
-	if err != nil {
-		return dto.SelectionTally{}, err
-	}
-	if chooser == nil {
-		return dto.SelectionTally{}, nil
-	}
-
-	spec := crud.Specification[entity.SessionVote]{}
-	spec.Model.SessionID = session.ID
-	spec.Model.ProfileID = *chooser
-	vote, err := dss.sessionVoteRepo.FindFirst(ctx, spec)
-	if err != nil {
-		return dto.SelectionTally{}, err
-	}
-	if vote.IsZero() {
-		return dto.SelectionTally{}, nil
-	}
-	return dto.SelectionTally{SelectedContentID: &vote.ContentID}, nil
-}
-
 func (dss *decisionSessionServiceImpl) CastVote(ctx context.Context, profileID, sessionID uuid.UUID, request dto.CastVoteRequest) (dto.TallyResponse, error) {
 	ctx, span := otel.Tracer.Start(ctx, "DecisionSessionService.CastVote")
 	defer span.End()
@@ -601,12 +414,14 @@ func (dss *decisionSessionServiceImpl) CastVote(ctx context.Context, profileID, 
 	// transaction, so a vote can't sneak in after a concurrent Finalize has
 	// already locked and completed this session — the same TOCTOU class
 	// Finalize itself was fixed for.
+	var session entity.DecisionSession
 	err := dss.transactor.WithinTransaction(ctx, func(ctx context.Context) error {
-		session, err := dss.lockVotingSession(ctx, sessionID, []string{"Candidates"})
+		var err error
+		session, err = dss.lockVotingSession(ctx, sessionID, []string{"Candidates"})
 		if err != nil {
 			return err
 		}
-		if session.Method != "majority" {
+		if session.Method != appconstant.SessionMethodMajority {
 			return ungerr.BadRequestError(fmt.Sprintf("session %s is not a majority session", sessionID))
 		}
 		if !containsCandidate(session.Candidates, request.ContentID) {
@@ -618,7 +433,7 @@ func (dss *decisionSessionServiceImpl) CastVote(ctx context.Context, profileID, 
 		return dto.TallyResponse{}, err
 	}
 
-	tally, err := dss.majorityTally(ctx, sessionID)
+	tally, err := dss.strategies[session.Method].Tally(ctx, session)
 	if err != nil {
 		return dto.TallyResponse{}, err
 	}
@@ -647,7 +462,7 @@ func (dss *decisionSessionServiceImpl) SubmitRanking(ctx context.Context, profil
 		if err != nil {
 			return err
 		}
-		if session.Method != "ranked" {
+		if session.Method != appconstant.SessionMethodRanked {
 			return ungerr.BadRequestError(fmt.Sprintf("session %s is not a ranked session", sessionID))
 		}
 
@@ -686,7 +501,7 @@ func (dss *decisionSessionServiceImpl) SubmitRanking(ctx context.Context, profil
 		return dto.TallyResponse{}, err
 	}
 
-	tally, err := dss.rankedTally(ctx, session)
+	tally, err := dss.strategies[session.Method].Tally(ctx, session)
 	if err != nil {
 		return dto.TallyResponse{}, err
 	}
@@ -707,17 +522,20 @@ func (dss *decisionSessionServiceImpl) Select(ctx context.Context, profileID, se
 	// concurrent Finalize has already locked and completed this session —
 	// the same TOCTOU class Finalize itself was fixed for.
 	var session entity.DecisionSession
+	var strat decisionmethod.Strategy
 	err := dss.transactor.WithinTransaction(ctx, func(ctx context.Context) error {
 		var err error
 		session, err = dss.lockVotingSession(ctx, sessionID, []string{"Candidates", "Participants"})
 		if err != nil {
 			return err
 		}
-		if session.Method != "round_robin" {
+		if session.Method != appconstant.SessionMethodRoundRobin {
 			return ungerr.BadRequestError(fmt.Sprintf("session %s is not a round robin session", sessionID))
 		}
 
-		chooser, err := dss.currentChooser(ctx, session)
+		strat = dss.strategies[session.Method]
+
+		chooser, err := strat.Chooser(ctx, session)
 		if err != nil {
 			return err
 		}
@@ -733,7 +551,7 @@ func (dss *decisionSessionServiceImpl) Select(ctx context.Context, profileID, se
 		return dto.TallyResponse{}, err
 	}
 
-	tally, err := dss.selectionTally(ctx, session)
+	tally, err := strat.Tally(ctx, session)
 	if err != nil {
 		return dto.TallyResponse{}, err
 	}
@@ -787,76 +605,14 @@ func (dss *decisionSessionServiceImpl) Finalize(ctx context.Context, profileID, 
 			return err
 		}
 
-		candidateIDs := make([]uuid.UUID, len(session.Candidates))
-		for i, c := range session.Candidates {
-			candidateIDs[i] = c.ContentID
-		}
-
-		var lockedGroup entity.Group
-		switch session.Method {
-		case "majority":
-			voteSpec := crud.Specification[entity.SessionVote]{}
-			voteSpec.Model.SessionID = sessionID
-			votes, err := dss.sessionVoteRepo.FindAll(ctx, voteSpec)
-			if err != nil {
-				return err
-			}
-			winnerID = resolveMajority(candidateIDs, votes, session.RandomSeed)
-
-		case "ranked":
-			rankingSpec := crud.Specification[entity.SessionRanking]{}
-			rankingSpec.Model.SessionID = sessionID
-			rankings, err := dss.sessionRankingRepo.FindAll(ctx, rankingSpec)
-			if err != nil {
-				return err
-			}
-			winnerID = resolveRanked(candidateIDs, rankings, session.RandomSeed)
-
-		case "priority":
-			snapshotSpec := crud.Specification[entity.SessionPrioritySnapshot]{}
-			snapshotSpec.Model.SessionID = sessionID
-			snapshots, err := dss.sessionPrioritySnapshotRepo.FindAll(ctx, snapshotSpec)
-			if err != nil {
-				return err
-			}
-			winnerID = resolvePriority(candidateIDs, snapshots, session.RandomSeed)
-
-		case "round_robin":
-			// One ForUpdate-locked group fetch covers both the chooser
-			// computation and the pointer increment below — closes a race
-			// where a concurrent Finalize of a sibling round_robin session
-			// in the same group could read the pointer via a separate,
-			// unlocked fetch and compute a stale chooser.
-			memberSpec := crud.Specification[entity.GroupMember]{}
-			memberSpec.Model.GroupID = session.GroupID
-			members, err := dss.groupMemberRepo.FindAll(ctx, memberSpec)
-			if err != nil {
-				return err
-			}
-			groupSpec := crud.Specification[entity.Group]{ForUpdate: true}
-			groupSpec.Model.ID = session.GroupID
-			lockedGroup, err = dss.groupRepo.FindFirst(ctx, groupSpec)
-			if err != nil {
-				return err
-			}
-			chooser := chooserFromGroup(lockedGroup, members, session.Participants)
-			var chooserVote *entity.SessionVote
-			if chooser != nil {
-				voteSpec := crud.Specification[entity.SessionVote]{}
-				voteSpec.Model.SessionID = sessionID
-				voteSpec.Model.ProfileID = *chooser
-				v, err := dss.sessionVoteRepo.FindFirst(ctx, voteSpec)
-				if err != nil {
-					return err
-				}
-				if !v.IsZero() {
-					chooserVote = &v
-				}
-			}
-			winnerID = resolveRoundRobin(candidateIDs, chooserVote, session.RandomSeed)
-
-		case "random":
-			winnerID = resolveRandom(candidateIDs, session.RandomSeed)
+		// Dispatches to the session's method strategy — round_robin's
+		// Resolve additionally advances groups.round_robin_pointer, using
+		// the same ForUpdate-locked group fetch for both the chooser
+		// computation and the pointer increment, inside this same
+		// transaction (see decisionmethod.roundRobinStrategy.Resolve).
+		winnerID, err = dss.strategies[session.Method].Resolve(ctx, session)
+		if err != nil {
+			return err
 		}
 
 		session.WinnerContentID = &winnerID
@@ -864,18 +620,6 @@ func (dss *decisionSessionServiceImpl) Finalize(ctx context.Context, profileID, 
 		session.FinalizedAt = &now
 		if _, err := dss.decisionSessionRepo.Update(ctx, session); err != nil {
 			return err
-		}
-
-		if session.Method == "round_robin" {
-			// Reuses the group fetched with ForUpdate in the round_robin case
-			// above — the same lock that serialized the chooser read also
-			// serializes this read-increment-write against any other
-			// concurrent Finalize touching the same group's pointer
-			// (lost-update race).
-			lockedGroup.RoundRobinPointer++
-			if _, err := dss.groupRepo.Update(ctx, lockedGroup); err != nil {
-				return err
-			}
 		}
 
 		return nil

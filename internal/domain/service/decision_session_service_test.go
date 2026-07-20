@@ -112,7 +112,7 @@ func newTestDecisionSessionService(t *testing.T) (
 	*mocks.MockRepository[entity.SessionParticipant],
 	*mocks.MockRepository[entity.SessionCandidate],
 	*mocks.MockRepository[entity.GroupMember],
-	*mocks.MockRepository[entity.Group],
+	*mocks.MockGroupRepository,
 	*mocks.MockRepository[entity.WatchlistItem],
 	*mocks.MockRepository[entity.SessionPrioritySnapshot],
 	*mocks.MockRepository[entity.SessionVote],
@@ -133,7 +133,7 @@ func newTestDecisionSessionService(t *testing.T) (
 	sessionParticipantRepo := mocks.NewMockRepository[entity.SessionParticipant](t)
 	sessionCandidateRepo := mocks.NewMockRepository[entity.SessionCandidate](t)
 	groupMemberRepo := mocks.NewMockRepository[entity.GroupMember](t)
-	groupRepo := mocks.NewMockRepository[entity.Group](t)
+	groupRepo := mocks.NewMockGroupRepository(t)
 	watchlistRepo := mocks.NewMockRepository[entity.WatchlistItem](t)
 	snapshotRepo := mocks.NewMockRepository[entity.SessionPrioritySnapshot](t)
 	sessionVoteRepo := mocks.NewMockRepository[entity.SessionVote](t)
@@ -155,147 +155,6 @@ func newTestDecisionSessionService(t *testing.T) (
 	)
 
 	return svc, decisionSessionRepo, sessionParticipantRepo, sessionCandidateRepo, groupMemberRepo, groupRepo, watchlistRepo, snapshotRepo, sessionVoteRepo, sessionRankingRepo, publisherMock
-}
-
-func TestChooserFromGroup(t *testing.T) {
-	a, b, c := uuid.New(), uuid.New(), uuid.New()
-	members := []entity.GroupMember{{ProfileID: a}, {ProfileID: b}, {ProfileID: c}}
-	participants := []entity.SessionParticipant{{ProfileID: a}, {ProfileID: b}, {ProfileID: c}}
-
-	t.Run("picks the member at the pointer index", func(t *testing.T) {
-		group := entity.Group{RoundRobinPointer: 0}
-
-		chooser := chooserFromGroup(group, members, participants)
-
-		require.NotNil(t, chooser)
-	})
-
-	t.Run("pointer past the ordered length wraps via modulo", func(t *testing.T) {
-		group := entity.Group{RoundRobinPointer: 0}
-		first := chooserFromGroup(group, members, participants)
-
-		wrapped := entity.Group{RoundRobinPointer: len(participants)}
-		second := chooserFromGroup(wrapped, members, participants)
-
-		require.NotNil(t, first)
-		require.NotNil(t, second)
-		assert.Equal(t, *first, *second)
-	})
-
-	t.Run("no member is a session participant yields nil", func(t *testing.T) {
-		group := entity.Group{RoundRobinPointer: 0}
-
-		chooser := chooserFromGroup(group, members, nil)
-
-		assert.Nil(t, chooser)
-	})
-}
-
-func TestDecisionSessionService_CapturePrioritySnapshots(t *testing.T) {
-	sessionID := uuid.New()
-	profileA := uuid.New()
-	profileB := uuid.New()
-	candidateOne := uuid.New()
-	candidateTwo := uuid.New()
-	offWatchlistCandidate := uuid.New()
-
-	t.Run("writes a snapshot per on-watchlist candidate and skips off-watchlist ones", func(t *testing.T) {
-		svc, _, _, _, _, _, watchlistRepo, snapshotRepo, _, _, _ := newTestDecisionSessionService(t)
-
-		// profileA has both candidates actively watchlisted.
-		watchlistRepo.EXPECT().
-			FindAll(mock.Anything, mock.MatchedBy(func(spec crud.Specification[entity.WatchlistItem]) bool {
-				return spec.Model.ProfileID == profileA && spec.Model.Status == appconstant.WatchlistStatusActive
-			})).
-			Return([]entity.WatchlistItem{
-				{ProfileID: profileA, ContentID: candidateOne, Priority: "high"},
-				{ProfileID: profileA, ContentID: candidateTwo, Priority: "must"},
-			}, nil)
-
-		// profileB is missing candidateTwo, and has an unrelated item that
-		// isn't in the session's candidate set.
-		watchlistRepo.EXPECT().
-			FindAll(mock.Anything, mock.MatchedBy(func(spec crud.Specification[entity.WatchlistItem]) bool {
-				return spec.Model.ProfileID == profileB && spec.Model.Status == appconstant.WatchlistStatusActive
-			})).
-			Return([]entity.WatchlistItem{
-				{ProfileID: profileB, ContentID: candidateOne, Priority: "low"},
-				{ProfileID: profileB, ContentID: offWatchlistCandidate, Priority: "medium"},
-			}, nil)
-
-		snapshotRepo.EXPECT().
-			InsertMany(mock.Anything, []entity.SessionPrioritySnapshot{
-				{SessionID: sessionID, ProfileID: profileA, ContentID: candidateOne, Priority: "high"},
-				{SessionID: sessionID, ProfileID: profileA, ContentID: candidateTwo, Priority: "must"},
-				{SessionID: sessionID, ProfileID: profileB, ContentID: candidateOne, Priority: "low"},
-			}).
-			Return(nil, nil)
-
-		err := svc.CapturePrioritySnapshots(
-			context.Background(), sessionID,
-			[]uuid.UUID{profileA, profileB},
-			[]uuid.UUID{candidateOne, candidateTwo},
-		)
-
-		assert.NoError(t, err)
-	})
-
-	t.Run("writes no rows and does not call InsertMany when nothing matches", func(t *testing.T) {
-		svc, _, _, _, _, _, watchlistRepo, snapshotRepo, _, _, _ := newTestDecisionSessionService(t)
-
-		watchlistRepo.EXPECT().
-			FindAll(mock.Anything, mock.Anything).
-			Return([]entity.WatchlistItem{}, nil)
-
-		err := svc.CapturePrioritySnapshots(
-			context.Background(), sessionID,
-			[]uuid.UUID{profileA},
-			[]uuid.UUID{candidateOne},
-		)
-
-		assert.NoError(t, err)
-		snapshotRepo.AssertNotCalled(t, "InsertMany", mock.Anything, mock.Anything)
-	})
-
-	t.Run("propagates FindAll error", func(t *testing.T) {
-		svc, _, _, _, _, _, watchlistRepo, _, _, _, _ := newTestDecisionSessionService(t)
-
-		wantErr := errors.New("db error")
-		watchlistRepo.EXPECT().
-			FindAll(mock.Anything, mock.Anything).
-			Return(nil, wantErr)
-
-		err := svc.CapturePrioritySnapshots(
-			context.Background(), sessionID,
-			[]uuid.UUID{profileA},
-			[]uuid.UUID{candidateOne},
-		)
-
-		assert.ErrorIs(t, err, wantErr)
-	})
-
-	t.Run("propagates InsertMany error", func(t *testing.T) {
-		svc, _, _, _, _, _, watchlistRepo, snapshotRepo, _, _, _ := newTestDecisionSessionService(t)
-
-		watchlistRepo.EXPECT().
-			FindAll(mock.Anything, mock.Anything).
-			Return([]entity.WatchlistItem{
-				{ProfileID: profileA, ContentID: candidateOne, Priority: "high"},
-			}, nil)
-
-		wantErr := errors.New("insert error")
-		snapshotRepo.EXPECT().
-			InsertMany(mock.Anything, mock.Anything).
-			Return(nil, wantErr)
-
-		err := svc.CapturePrioritySnapshots(
-			context.Background(), sessionID,
-			[]uuid.UUID{profileA},
-			[]uuid.UUID{candidateOne},
-		)
-
-		assert.ErrorIs(t, err, wantErr)
-	})
 }
 
 // Create's candidate-validation branch (mergedContentIDs's raw SQL against
@@ -647,7 +506,7 @@ func TestDecisionSessionService_Select(t *testing.T) {
 			Return(entity.SessionParticipant{BaseEntity: crud.BaseEntity{ID: uuid.New()}, SessionID: sessionID, ProfileID: callerID}, nil)
 	}
 
-	expectChooser := func(groupMemberRepo *mocks.MockRepository[entity.GroupMember], groupRepo *mocks.MockRepository[entity.Group]) {
+	expectChooser := func(groupMemberRepo *mocks.MockRepository[entity.GroupMember], groupRepo *mocks.MockGroupRepository) {
 		groupMemberRepo.EXPECT().
 			FindAll(mock.Anything, mock.MatchedBy(func(spec crud.Specification[entity.GroupMember]) bool {
 				return spec.Model.GroupID == groupID
