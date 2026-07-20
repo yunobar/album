@@ -432,6 +432,80 @@ func (_c *MockGroupRepository_FindMergedContentIDs_Call) RunAndReturn(run func(c
 	return _c
 }
 
+// FindMergedWatchlist provides a mock function for the type MockGroupRepository
+func (_mock *MockGroupRepository) FindMergedWatchlist(ctx context.Context, groupID uuid.UUID, filter string) ([]repository.MergedWatchlistRow, error) {
+	ret := _mock.Called(ctx, groupID, filter)
+
+	if len(ret) == 0 {
+		panic("no return value specified for FindMergedWatchlist")
+	}
+
+	var r0 []repository.MergedWatchlistRow
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uuid.UUID, string) ([]repository.MergedWatchlistRow, error)); ok {
+		return returnFunc(ctx, groupID, filter)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uuid.UUID, string) []repository.MergedWatchlistRow); ok {
+		r0 = returnFunc(ctx, groupID, filter)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]repository.MergedWatchlistRow)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, uuid.UUID, string) error); ok {
+		r1 = returnFunc(ctx, groupID, filter)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// MockGroupRepository_FindMergedWatchlist_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'FindMergedWatchlist'
+type MockGroupRepository_FindMergedWatchlist_Call struct {
+	*mock.Call
+}
+
+// FindMergedWatchlist is a helper method to define mock.On call
+//   - ctx context.Context
+//   - groupID uuid.UUID
+//   - filter string
+func (_e *MockGroupRepository_Expecter) FindMergedWatchlist(ctx any, groupID any, filter any) *MockGroupRepository_FindMergedWatchlist_Call {
+	return &MockGroupRepository_FindMergedWatchlist_Call{Call: _e.mock.On("FindMergedWatchlist", ctx, groupID, filter)}
+}
+
+func (_c *MockGroupRepository_FindMergedWatchlist_Call) Run(run func(ctx context.Context, groupID uuid.UUID, filter string)) *MockGroupRepository_FindMergedWatchlist_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 uuid.UUID
+		if args[1] != nil {
+			arg1 = args[1].(uuid.UUID)
+		}
+		var arg2 string
+		if args[2] != nil {
+			arg2 = args[2].(string)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *MockGroupRepository_FindMergedWatchlist_Call) Return(mergedWatchlistRows []repository.MergedWatchlistRow, err error) *MockGroupRepository_FindMergedWatchlist_Call {
+	_c.Call.Return(mergedWatchlistRows, err)
+	return _c
+}
+
+func (_c *MockGroupRepository_FindMergedWatchlist_Call) RunAndReturn(run func(ctx context.Context, groupID uuid.UUID, filter string) ([]repository.MergedWatchlistRow, error)) *MockGroupRepository_FindMergedWatchlist_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // GetGormInstance provides a mock function for the type MockGroupRepository
 func (_mock *MockGroupRepository) GetGormInstance(ctx context.Context) (*gorm.DB, error) {
 	ret := _mock.Called(ctx)
