@@ -39,6 +39,11 @@ packages:
       WatchlistService:
         config:
           all: true
+  github.com/yunobar/album/internal/domain/repository:
+    interfaces:
+      GroupRepository:
+        config:
+          all: true
   github.com/yunobar/album/internal/domain/client:
     interfaces:
       TMDBClient:
@@ -47,5 +52,10 @@ packages:
   github.com/nats-io/nats.go/jetstream:
     interfaces:
       KeyValue:
+        config:
+          all: true
+  github.com/yunobar/album/internal/core/pubsub:
+    interfaces:
+      Publisher:
         config:
           all: true

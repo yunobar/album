@@ -14,9 +14,18 @@ type MemberResponse struct {
 
 type GroupResponse struct {
 	BaseDTO
-	Name        string           `json:"name"`
-	InviteToken string           `json:"inviteToken"`
-	Members     []MemberResponse `json:"members"`
+	Name          string                 `json:"name"`
+	InviteToken   string                 `json:"inviteToken"`
+	Members       []MemberResponse       `json:"members"`
+	ActiveSession *ActiveSessionResponse `json:"activeSession"`
+}
+
+// ActiveSessionResponse is the caller's in-flight session in this group, or
+// nil — the only group→session resolution path in the API (ADR-0006). Never
+// confirms a session exists to a member who isn't one of its participants.
+type ActiveSessionResponse struct {
+	ID     uuid.UUID `json:"id"`
+	Method string    `json:"method"`
 }
 
 type GroupSummaryResponse struct {

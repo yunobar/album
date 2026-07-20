@@ -63,7 +63,7 @@ type MockMailService_Send_Call struct {
 // Send is a helper method to define mock.On call
 //   - ctx context.Context
 //   - msg mail.MailMessage
-func (_e *MockMailService_Expecter) Send(ctx interface{}, msg interface{}) *MockMailService_Send_Call {
+func (_e *MockMailService_Expecter) Send(ctx any, msg any) *MockMailService_Send_Call {
 	return &MockMailService_Send_Call{Call: _e.mock.On("Send", ctx, msg)}
 }
 

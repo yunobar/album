@@ -8,11 +8,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/itsLeonB/go-crud"
 	"github.com/itsLeonB/ungerr"
-	"github.com/yunobar/album/internal/appconstant"
 	"github.com/yunobar/album/internal/core/otel"
 	"github.com/yunobar/album/internal/domain/dto"
 	"github.com/yunobar/album/internal/domain/entity"
 	"github.com/yunobar/album/internal/domain/mapper"
+	"github.com/yunobar/album/internal/domain/repository"
 	"gorm.io/gorm/clause"
 )
 
@@ -26,14 +26,14 @@ type GroupService interface {
 
 type groupServiceImpl struct {
 	transactor      crud.Transactor
-	groupRepo       crud.Repository[entity.Group]
+	groupRepo       repository.GroupRepository
 	groupMemberRepo crud.Repository[entity.GroupMember]
 	profileRepo     crud.Repository[entity.UserProfile]
 }
 
 func NewGroupService(
 	transactor crud.Transactor,
-	groupRepo crud.Repository[entity.Group],
+	groupRepo repository.GroupRepository,
 	groupMemberRepo crud.Repository[entity.GroupMember],
 	profileRepo crud.Repository[entity.UserProfile],
 ) GroupService {
@@ -101,7 +101,8 @@ func (gs *groupServiceImpl) Create(ctx context.Context, profileID uuid.UUID, req
 		}
 		member.Profile = profile
 
-		response = mapper.GroupToResponse(group, []entity.GroupMember{member}, profileID)
+		// A brand-new group has no session yet — always null (ADR-0006).
+		response = mapper.GroupToResponse(group, []entity.GroupMember{member}, profileID, nil)
 		return nil
 	})
 
@@ -158,7 +159,9 @@ func (gs *groupServiceImpl) Join(ctx context.Context, profileID uuid.UUID, token
 			return err
 		}
 
-		response = mapper.GroupToResponse(group, members, profileID)
+		// A fresh joiner is in no frozen session_participants set yet —
+		// effectively always null (ADR-0006).
+		response = mapper.GroupToResponse(group, members, profileID, nil)
 		return nil
 	})
 
@@ -179,7 +182,29 @@ func (gs *groupServiceImpl) Get(ctx context.Context, profileID, groupID uuid.UUI
 		return dto.GroupResponse{}, err
 	}
 
-	return mapper.GroupToResponse(membership.Group, members, profileID), nil
+	activeSession, err := gs.activeSessionFor(ctx, groupID, profileID)
+	if err != nil {
+		return dto.GroupResponse{}, err
+	}
+
+	return mapper.GroupToResponse(membership.Group, members, profileID, activeSession), nil
+}
+
+// activeSessionFor is the caller-scoped group→session resolution path
+// (ADR-0006) — see repository.GroupRepository.FindActiveSession for the
+// join. Keeping this caller-scoped is what keeps it consistent with GET
+// /sessions/:id's non-disclosure rule — see decision_session_service.go's
+// requireParticipant.
+func (gs *groupServiceImpl) activeSessionFor(ctx context.Context, groupID, profileID uuid.UUID) (*dto.ActiveSessionResponse, error) {
+	session, err := gs.groupRepo.FindActiveSession(ctx, groupID, profileID)
+	if err != nil {
+		return nil, err
+	}
+	if session == nil {
+		return nil, nil
+	}
+
+	return &dto.ActiveSessionResponse{ID: session.ID, Method: mapper.MethodToAPI(session.Method)}, nil
 }
 
 // requireMembership loads the caller's membership row for groupID, preloaded
@@ -225,20 +250,6 @@ func (gs *groupServiceImpl) membersOf(ctx context.Context, groupID uuid.UUID) ([
 	return members, nil
 }
 
-// mergedWatchlistRow is one (member, active watchlist item, content) row —
-// deliberately unaggregated: array_agg/jsonb_object_agg would need a
-// Postgres-specific scan type with no precedent in this codebase, whereas
-// grouping in Go after a plain JOIN is a few lines of stdlib.
-type mergedWatchlistRow struct {
-	ContentID   uuid.UUID
-	ProfileID   uuid.UUID
-	Priority    string
-	ContentType string
-	Title       string
-	ReleaseYear *int
-	PosterURL   string
-}
-
 func (gs *groupServiceImpl) GetMergedWatchlist(ctx context.Context, profileID, groupID uuid.UUID, filter string) (dto.MergedWatchlistResponse, error) {
 	ctx, span := otel.Tracer.Start(ctx, "GroupService.GetMergedWatchlist")
 	defer span.End()
@@ -251,28 +262,9 @@ func (gs *groupServiceImpl) GetMergedWatchlist(ctx context.Context, profileID, g
 		filter = "all"
 	}
 
-	db, err := gs.groupMemberRepo.GetGormInstance(ctx)
+	rows, err := gs.groupRepo.FindMergedWatchlist(ctx, groupID, filter)
 	if err != nil {
 		return dto.MergedWatchlistResponse{}, err
-	}
-
-	var rows []mergedWatchlistRow
-	err = db.Raw(`
-		SELECT wi.content_id  AS content_id,
-		       wi.profile_id  AS profile_id,
-		       wi.priority    AS priority,
-		       c.content_type AS content_type,
-		       c.title        AS title,
-		       c.release_year AS release_year,
-		       c.poster_url   AS poster_url
-		FROM group_members gm
-		JOIN watchlist_items wi ON wi.profile_id = gm.profile_id AND wi.status = ?
-		JOIN content c ON c.id = wi.content_id
-		WHERE gm.group_id = ?
-		  AND (? = 'all' OR c.content_type = ?)
-	`, appconstant.WatchlistStatusActive, groupID, filter, filter).Scan(&rows).Error
-	if err != nil {
-		return dto.MergedWatchlistResponse{}, ungerr.Wrap(err, "error querying merged watchlist")
 	}
 
 	return dto.MergedWatchlistResponse{Filter: filter, Items: mergeRows(rows)}, nil
@@ -280,7 +272,7 @@ func (gs *groupServiceImpl) GetMergedWatchlist(ctx context.Context, profileID, g
 
 // mergeRows groups per-member rows by content_id (the dedup anchor — see
 // ADR-0002) and orders the result by interested_count desc, then title.
-func mergeRows(rows []mergedWatchlistRow) []dto.MergedItemResponse {
+func mergeRows(rows []repository.MergedWatchlistRow) []dto.MergedItemResponse {
 	type accumulator struct {
 		content    dto.ContentResponse
 		members    []uuid.UUID

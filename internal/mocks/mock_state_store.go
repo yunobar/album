@@ -109,7 +109,7 @@ type MockStateStore_Store_Call struct {
 //   - state string
 //   - value string
 //   - expiry time.Duration
-func (_e *MockStateStore_Expecter) Store(ctx interface{}, state interface{}, value interface{}, expiry interface{}) *MockStateStore_Store_Call {
+func (_e *MockStateStore_Expecter) Store(ctx any, state any, value any, expiry any) *MockStateStore_Store_Call {
 	return &MockStateStore_Store_Call{Call: _e.mock.On("Store", ctx, state, value, expiry)}
 }
 
@@ -185,7 +185,7 @@ type MockStateStore_VerifyAndDelete_Call struct {
 // VerifyAndDelete is a helper method to define mock.On call
 //   - ctx context.Context
 //   - state string
-func (_e *MockStateStore_Expecter) VerifyAndDelete(ctx interface{}, state interface{}) *MockStateStore_VerifyAndDelete_Call {
+func (_e *MockStateStore_Expecter) VerifyAndDelete(ctx any, state any) *MockStateStore_VerifyAndDelete_Call {
 	return &MockStateStore_VerifyAndDelete_Call{Call: _e.mock.On("VerifyAndDelete", ctx, state)}
 }
 

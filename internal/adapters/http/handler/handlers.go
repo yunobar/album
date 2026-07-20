@@ -9,11 +9,12 @@ import (
 )
 
 type Handlers struct {
-	Auth      *authgin.Handler
-	Profile   *ProfileHandler
-	Content   *ContentHandler
-	Watchlist *WatchlistHandler
-	Group     *GroupHandler
+	Auth            *authgin.Handler
+	Profile         *ProfileHandler
+	Content         *ContentHandler
+	Watchlist       *WatchlistHandler
+	Group           *GroupHandler
+	DecisionSession *DecisionSessionHandler
 
 	emailLimiter *middlewares.ValueLimiter
 }
@@ -22,7 +23,7 @@ func (h *Handlers) Shutdown() {
 	h.emailLimiter.Stop()
 }
 
-func ProvideHandlers(services *provider.Services, transport *authgin.CookieTransport) *Handlers {
+func ProvideHandlers(services *provider.Services, coreSvc *provider.CoreServices, transport *authgin.CookieTransport) *Handlers {
 	emailLimiter := middlewares.NewValueLimiter(3.0/3600, 3, time.Hour)
 
 	authHandler := authgin.NewHandler(services.AuthKit, transport, authgin.HandlerConfig{
@@ -31,11 +32,12 @@ func ProvideHandlers(services *provider.Services, transport *authgin.CookieTrans
 	})
 
 	return &Handlers{
-		Auth:      authHandler,
-		Profile:   NewProfileHandler(services.Profile),
-		Content:   NewContentHandler(services.Content),
-		Watchlist: NewWatchlistHandler(services.Watchlist),
-		Group:     NewGroupHandler(services.Group),
+		Auth:            authHandler,
+		Profile:         NewProfileHandler(services.Profile),
+		Content:         NewContentHandler(services.Content),
+		Watchlist:       NewWatchlistHandler(services.Watchlist),
+		Group:           NewGroupHandler(services.Group),
+		DecisionSession: NewDecisionSessionHandler(services.DecisionSession, coreSvc.NATSConn),
 
 		emailLimiter: emailLimiter,
 	}

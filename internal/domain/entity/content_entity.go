@@ -16,7 +16,3 @@ type Content struct {
 	PosterURL   string
 	Metadata    json.RawMessage `gorm:"type:jsonb"`
 }
-
-func (Content) TableName() string {
-	return "content"
-}

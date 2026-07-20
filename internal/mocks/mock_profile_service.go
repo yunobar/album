@@ -73,7 +73,7 @@ type MockProfileService_Create_Call struct {
 // Create is a helper method to define mock.On call
 //   - ctx context.Context
 //   - request dto.NewProfileRequest
-func (_e *MockProfileService_Expecter) Create(ctx interface{}, request interface{}) *MockProfileService_Create_Call {
+func (_e *MockProfileService_Expecter) Create(ctx any, request any) *MockProfileService_Create_Call {
 	return &MockProfileService_Create_Call{Call: _e.mock.On("Create", ctx, request)}
 }
 
@@ -139,7 +139,7 @@ type MockProfileService_GetByID_Call struct {
 // GetByID is a helper method to define mock.On call
 //   - ctx context.Context
 //   - id uuid.UUID
-func (_e *MockProfileService_Expecter) GetByID(ctx interface{}, id interface{}) *MockProfileService_GetByID_Call {
+func (_e *MockProfileService_Expecter) GetByID(ctx any, id any) *MockProfileService_GetByID_Call {
 	return &MockProfileService_GetByID_Call{Call: _e.mock.On("GetByID", ctx, id)}
 }
 
@@ -207,7 +207,7 @@ type MockProfileService_GetProfileIDByUserID_Call struct {
 // GetProfileIDByUserID is a helper method to define mock.On call
 //   - ctx context.Context
 //   - userID uuid.UUID
-func (_e *MockProfileService_Expecter) GetProfileIDByUserID(ctx interface{}, userID interface{}) *MockProfileService_GetProfileIDByUserID_Call {
+func (_e *MockProfileService_Expecter) GetProfileIDByUserID(ctx any, userID any) *MockProfileService_GetProfileIDByUserID_Call {
 	return &MockProfileService_GetProfileIDByUserID_Call{Call: _e.mock.On("GetProfileIDByUserID", ctx, userID)}
 }
 
@@ -273,7 +273,7 @@ type MockProfileService_Update_Call struct {
 // Update is a helper method to define mock.On call
 //   - ctx context.Context
 //   - req dto.UpdateProfileRequest
-func (_e *MockProfileService_Expecter) Update(ctx interface{}, req interface{}) *MockProfileService_Update_Call {
+func (_e *MockProfileService_Expecter) Update(ctx any, req any) *MockProfileService_Update_Call {
 	return &MockProfileService_Update_Call{Call: _e.mock.On("Update", ctx, req)}
 }
 

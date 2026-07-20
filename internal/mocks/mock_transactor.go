@@ -72,7 +72,7 @@ type MockTransactor_Begin_Call struct {
 
 // Begin is a helper method to define mock.On call
 //   - ctx context.Context
-func (_e *MockTransactor_Expecter) Begin(ctx interface{}) *MockTransactor_Begin_Call {
+func (_e *MockTransactor_Expecter) Begin(ctx any) *MockTransactor_Begin_Call {
 	return &MockTransactor_Begin_Call{Call: _e.mock.On("Begin", ctx)}
 }
 
@@ -123,7 +123,7 @@ type MockTransactor_Commit_Call struct {
 
 // Commit is a helper method to define mock.On call
 //   - ctx context.Context
-func (_e *MockTransactor_Expecter) Commit(ctx interface{}) *MockTransactor_Commit_Call {
+func (_e *MockTransactor_Expecter) Commit(ctx any) *MockTransactor_Commit_Call {
 	return &MockTransactor_Commit_Call{Call: _e.mock.On("Commit", ctx)}
 }
 
@@ -163,7 +163,7 @@ type MockTransactor_Rollback_Call struct {
 
 // Rollback is a helper method to define mock.On call
 //   - ctx context.Context
-func (_e *MockTransactor_Expecter) Rollback(ctx interface{}) *MockTransactor_Rollback_Call {
+func (_e *MockTransactor_Expecter) Rollback(ctx any) *MockTransactor_Rollback_Call {
 	return &MockTransactor_Rollback_Call{Call: _e.mock.On("Rollback", ctx)}
 }
 
@@ -215,7 +215,7 @@ type MockTransactor_WithinTransaction_Call struct {
 // WithinTransaction is a helper method to define mock.On call
 //   - ctx context.Context
 //   - serviceFn func(ctx context.Context) error
-func (_e *MockTransactor_Expecter) WithinTransaction(ctx interface{}, serviceFn interface{}) *MockTransactor_WithinTransaction_Call {
+func (_e *MockTransactor_Expecter) WithinTransaction(ctx any, serviceFn any) *MockTransactor_WithinTransaction_Call {
 	return &MockTransactor_WithinTransaction_Call{Call: _e.mock.On("WithinTransaction", ctx, serviceFn)}
 }
 

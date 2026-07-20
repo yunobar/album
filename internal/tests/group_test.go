@@ -108,6 +108,67 @@ func TestGroupGet(t *testing.T) {
 	})
 }
 
+func TestGroupActiveSession(t *testing.T) {
+	testhelpers.RequireTestDB(t, testDB)
+
+	t.Run("activeSession is caller-scoped; a second create while one is voting 409s", func(t *testing.T) {
+		testhelpers.TruncateAll(t, testDB)
+		seedTestUser(t)
+		bob := seedTestProfile(t, "Bob")
+		carol := seedTestProfile(t, "Carol")
+		group := seedTestGroup(t, nil, testProfileID, bob.ID, carol.ID)
+		content := seedTestContent(t)
+		seedActiveWatchlistItem(t, testProfileID, content.ID)
+
+		created := postCreateSession(t, group.ID, dto.CreateSessionRequest{
+			Method:              "majority",
+			ParticipantIDs:      []uuid.UUID{testProfileID, bob.ID},
+			CandidateContentIDs: []uuid.UUID{content.ID},
+		}, http.StatusCreated)
+
+		// The non-creator participant reaches the session id purely through
+		// GET /groups/:id — this is the only group->session resolution path
+		// (ADR-0006).
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest(http.MethodGet, "/api/v1/groups/"+group.ID.String(), nil)
+		req.Header.Set(testProfileIDHeader, bob.ID.String())
+		testRouter.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var bobResp struct {
+			Data dto.GroupResponse `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &bobResp))
+		require.NotNil(t, bobResp.Data.ActiveSession, "a participant must be able to discover the session via the group payload")
+		assert.Equal(t, created.ID, bobResp.Data.ActiveSession.ID)
+		assert.Equal(t, "majority", bobResp.Data.ActiveSession.Method)
+
+		// carol is a group member but was not picked as a participant —
+		// activeSession must stay null for her, matching GET /sessions/:id's
+		// non-disclosure rule for non-participants.
+		w2 := httptest.NewRecorder()
+		req2, _ := http.NewRequest(http.MethodGet, "/api/v1/groups/"+group.ID.String(), nil)
+		req2.Header.Set(testProfileIDHeader, carol.ID.String())
+		testRouter.ServeHTTP(w2, req2)
+		require.Equal(t, http.StatusOK, w2.Code)
+
+		var carolResp struct {
+			Data dto.GroupResponse `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(w2.Body.Bytes(), &carolResp))
+		assert.Nil(t, carolResp.Data.ActiveSession, "a group member excluded from the session must not learn it exists")
+
+		// One live session per group: a second create while this one is
+		// still voting is rejected, not silently allowed to make
+		// activeSession ambiguous.
+		postCreateSession(t, group.ID, dto.CreateSessionRequest{
+			Method:              "majority",
+			ParticipantIDs:      []uuid.UUID{testProfileID},
+			CandidateContentIDs: []uuid.UUID{content.ID},
+		}, http.StatusConflict)
+	})
+}
+
 func TestGroupList(t *testing.T) {
 	testhelpers.RequireTestDB(t, testDB)
 

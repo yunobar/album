@@ -11,10 +11,15 @@ import (
 	"github.com/itsLeonB/ginkgo/pkg/middleware"
 	"github.com/itsLeonB/go-crud"
 	"github.com/itsLeonB/ungerr"
+	"github.com/nats-io/nats.go"
+	"github.com/yunobar/album/internal/adapters/http/handler"
 	"github.com/yunobar/album/internal/appconstant"
+	"github.com/yunobar/album/internal/core/config"
 	"github.com/yunobar/album/internal/core/logger"
+	"github.com/yunobar/album/internal/core/pubsub"
 	"github.com/yunobar/album/internal/domain/dto"
 	"github.com/yunobar/album/internal/domain/entity"
+	"github.com/yunobar/album/internal/domain/repository"
 	"github.com/yunobar/album/internal/domain/service"
 	"github.com/yunobar/album/internal/testhelpers"
 	"gorm.io/gorm"
@@ -22,6 +27,7 @@ import (
 
 var (
 	testDB     *gorm.DB
+	testNATS   *nats.Conn
 	testRouter *gin.Engine
 
 	testProfileID = uuid.MustParse("00000000-0000-0000-0000-000000000002")
@@ -32,6 +38,11 @@ var (
 	currentContentService service.ContentService
 )
 
+// testClientOrigin is the only origin the WS upgrader (decision_session_handler.go)
+// accepts in tests. It stands in for config.Global.ClientUrls, matching the
+// frontend origin used elsewhere in .env.example (e.g. OAUTH_GOOGLE_REDIRECT_URL).
+const testClientOrigin = "http://localhost:5173"
+
 func TestMain(m *testing.M) {
 	db, cleanup, err := testhelpers.SetupTestDB("../../.env.test")
 	if err != nil {
@@ -40,6 +51,18 @@ func TestMain(m *testing.M) {
 	}
 	testDB = db
 	defer cleanup()
+
+	nc, natsCleanup := testhelpers.SetupTestNATS()
+	testNATS = nc
+	defer natsCleanup()
+
+	// ponytail: this test binary never calls config.Load() (it wires repos/
+	// services directly against testDB/testNATS, not the full env-loaded
+	// config.Global), so config.Global is otherwise nil here. The WS upgrader
+	// needs config.Global.ClientUrls for its Origin allowlist, so set just
+	// that field directly rather than pulling in config.Load()'s full set of
+	// required env vars (DB/MAIL/OAUTH/OTEL/TMDB) for one field.
+	config.Global = &config.Config{App: config.App{ClientUrls: []string{testClientOrigin}}}
 
 	logger.Init("album-test")
 	testRouter = setupTestRouter(db)
@@ -86,7 +109,24 @@ func registerTestRoutes(r *gin.Engine, db *gorm.DB) {
 	// Services
 	profileSvc := service.NewProfileService(transactor, profileRepo, userRepo)
 	watchlistSvc := service.NewWatchlistService(transactor, crud.NewRepository[entity.WatchlistItem](db), crud.NewRepository[entity.Content](db))
-	groupSvc := service.NewGroupService(transactor, crud.NewRepository[entity.Group](db), crud.NewRepository[entity.GroupMember](db), profileRepo)
+	groupSvc := service.NewGroupService(transactor, repository.NewGroupRepository(db), crud.NewRepository[entity.GroupMember](db), profileRepo)
+	decisionSessionSvc := service.NewDecisionSessionService(
+		transactor,
+		crud.NewRepository[entity.DecisionSession](db),
+		crud.NewRepository[entity.SessionParticipant](db),
+		crud.NewRepository[entity.SessionCandidate](db),
+		crud.NewRepository[entity.GroupMember](db),
+		repository.NewGroupRepository(db),
+		crud.NewRepository[entity.WatchlistItem](db),
+		crud.NewRepository[entity.SessionPrioritySnapshot](db),
+		crud.NewRepository[entity.SessionVote](db),
+		crud.NewRepository[entity.SessionRanking](db),
+		// The real NATS-backed publisher, not a mock — nats-go's Publish
+		// gracefully returns ErrInvalidConnection on a nil *nats.Conn (see
+		// nats.go's (*Conn).publish nil check), so every non-WS feature test
+		// keeps passing even when testNATS is nil (no local NATS server).
+		pubsub.NewPublisher(testNATS),
+	)
 
 	// Routes
 	api := r.Group("/api/v1")
@@ -234,6 +274,114 @@ func registerTestRoutes(r *gin.Engine, db *gorm.DB) {
 		}
 		c.JSON(http.StatusOK, gin.H{"data": resp})
 	})
+
+	// Decision Sessions
+	api.POST("/groups/:groupID/sessions", func(c *gin.Context) {
+		groupID, err := uuid.Parse(c.Param("groupID"))
+		if err != nil {
+			_ = c.Error(ungerr.BadRequestError("invalid groupID"))
+			return
+		}
+		var req dto.CreateSessionRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			_ = c.Error(ungerr.Wrap(err, "validation"))
+			return
+		}
+		resp, err := decisionSessionSvc.Create(c.Request.Context(), getTestProfileID(c), groupID, req)
+		if err != nil {
+			_ = c.Error(err)
+			return
+		}
+		c.JSON(http.StatusCreated, gin.H{"data": resp})
+	})
+	api.GET("/sessions/:sessionID", func(c *gin.Context) {
+		sessionID, err := uuid.Parse(c.Param("sessionID"))
+		if err != nil {
+			_ = c.Error(ungerr.BadRequestError("invalid sessionID"))
+			return
+		}
+		resp, err := decisionSessionSvc.Get(c.Request.Context(), getTestProfileID(c), sessionID)
+		if err != nil {
+			_ = c.Error(err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"data": resp})
+	})
+	api.POST("/sessions/:sessionID/votes", func(c *gin.Context) {
+		sessionID, err := uuid.Parse(c.Param("sessionID"))
+		if err != nil {
+			_ = c.Error(ungerr.BadRequestError("invalid sessionID"))
+			return
+		}
+		var req dto.CastVoteRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			_ = c.Error(ungerr.Wrap(err, "validation"))
+			return
+		}
+		resp, err := decisionSessionSvc.CastVote(c.Request.Context(), getTestProfileID(c), sessionID, req)
+		if err != nil {
+			_ = c.Error(err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"data": resp})
+	})
+	api.POST("/sessions/:sessionID/rankings", func(c *gin.Context) {
+		sessionID, err := uuid.Parse(c.Param("sessionID"))
+		if err != nil {
+			_ = c.Error(ungerr.BadRequestError("invalid sessionID"))
+			return
+		}
+		var req dto.SubmitRankingRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			_ = c.Error(ungerr.Wrap(err, "validation"))
+			return
+		}
+		resp, err := decisionSessionSvc.SubmitRanking(c.Request.Context(), getTestProfileID(c), sessionID, req)
+		if err != nil {
+			_ = c.Error(err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"data": resp})
+	})
+	api.POST("/sessions/:sessionID/select", func(c *gin.Context) {
+		sessionID, err := uuid.Parse(c.Param("sessionID"))
+		if err != nil {
+			_ = c.Error(ungerr.BadRequestError("invalid sessionID"))
+			return
+		}
+		var req dto.CastVoteRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			_ = c.Error(ungerr.Wrap(err, "validation"))
+			return
+		}
+		resp, err := decisionSessionSvc.Select(c.Request.Context(), getTestProfileID(c), sessionID, req)
+		if err != nil {
+			_ = c.Error(err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"data": resp})
+	})
+	api.POST("/sessions/:sessionID/finalize", func(c *gin.Context) {
+		sessionID, err := uuid.Parse(c.Param("sessionID"))
+		if err != nil {
+			_ = c.Error(ungerr.BadRequestError("invalid sessionID"))
+			return
+		}
+		resp, err := decisionSessionSvc.Finalize(c.Request.Context(), getTestProfileID(c), sessionID)
+		if err != nil {
+			_ = c.Error(err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"data": resp})
+	})
+
+	// Live updates (Task 5) — registered via the real handler, not a thin
+	// inline closure, since this is the one endpoint that needs the actual
+	// WS-upgrade/NATS-subscribe/forward code under test, using the real
+	// testNATS connection (nil-safe, see NewDecisionSessionService call
+	// above) rather than a mock.
+	decisionSessionHandler := handler.NewDecisionSessionHandler(decisionSessionSvc, testNATS)
+	api.GET("/sessions/:sessionID/live", decisionSessionHandler.HandleLive())
 }
 
 func getTestProfileID(c *gin.Context) uuid.UUID {

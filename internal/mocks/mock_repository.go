@@ -64,7 +64,7 @@ type MockRepository_Delete_Call[T any] struct {
 // Delete is a helper method to define mock.On call
 //   - ctx context.Context
 //   - model T
-func (_e *MockRepository_Expecter[T]) Delete(ctx interface{}, model interface{}) *MockRepository_Delete_Call[T] {
+func (_e *MockRepository_Expecter[T]) Delete(ctx any, model any) *MockRepository_Delete_Call[T] {
 	return &MockRepository_Delete_Call[T]{Call: _e.mock.On("Delete", ctx, model)}
 }
 
@@ -121,7 +121,7 @@ type MockRepository_DeleteMany_Call[T any] struct {
 // DeleteMany is a helper method to define mock.On call
 //   - ctx context.Context
 //   - models []T
-func (_e *MockRepository_Expecter[T]) DeleteMany(ctx interface{}, models interface{}) *MockRepository_DeleteMany_Call[T] {
+func (_e *MockRepository_Expecter[T]) DeleteMany(ctx any, models any) *MockRepository_DeleteMany_Call[T] {
 	return &MockRepository_DeleteMany_Call[T]{Call: _e.mock.On("DeleteMany", ctx, models)}
 }
 
@@ -189,7 +189,7 @@ type MockRepository_FindAll_Call[T any] struct {
 // FindAll is a helper method to define mock.On call
 //   - ctx context.Context
 //   - spec crud.Specification[T]
-func (_e *MockRepository_Expecter[T]) FindAll(ctx interface{}, spec interface{}) *MockRepository_FindAll_Call[T] {
+func (_e *MockRepository_Expecter[T]) FindAll(ctx any, spec any) *MockRepository_FindAll_Call[T] {
 	return &MockRepository_FindAll_Call[T]{Call: _e.mock.On("FindAll", ctx, spec)}
 }
 
@@ -257,7 +257,7 @@ type MockRepository_FindFirst_Call[T any] struct {
 // FindFirst is a helper method to define mock.On call
 //   - ctx context.Context
 //   - spec crud.Specification[T]
-func (_e *MockRepository_Expecter[T]) FindFirst(ctx interface{}, spec interface{}) *MockRepository_FindFirst_Call[T] {
+func (_e *MockRepository_Expecter[T]) FindFirst(ctx any, spec any) *MockRepository_FindFirst_Call[T] {
 	return &MockRepository_FindFirst_Call[T]{Call: _e.mock.On("FindFirst", ctx, spec)}
 }
 
@@ -324,7 +324,7 @@ type MockRepository_GetGormInstance_Call[T any] struct {
 
 // GetGormInstance is a helper method to define mock.On call
 //   - ctx context.Context
-func (_e *MockRepository_Expecter[T]) GetGormInstance(ctx interface{}) *MockRepository_GetGormInstance_Call[T] {
+func (_e *MockRepository_Expecter[T]) GetGormInstance(ctx any) *MockRepository_GetGormInstance_Call[T] {
 	return &MockRepository_GetGormInstance_Call[T]{Call: _e.mock.On("GetGormInstance", ctx)}
 }
 
@@ -387,7 +387,7 @@ type MockRepository_Insert_Call[T any] struct {
 // Insert is a helper method to define mock.On call
 //   - ctx context.Context
 //   - model T
-func (_e *MockRepository_Expecter[T]) Insert(ctx interface{}, model interface{}) *MockRepository_Insert_Call[T] {
+func (_e *MockRepository_Expecter[T]) Insert(ctx any, model any) *MockRepository_Insert_Call[T] {
 	return &MockRepository_Insert_Call[T]{Call: _e.mock.On("Insert", ctx, model)}
 }
 
@@ -455,7 +455,7 @@ type MockRepository_InsertMany_Call[T any] struct {
 // InsertMany is a helper method to define mock.On call
 //   - ctx context.Context
 //   - models []T
-func (_e *MockRepository_Expecter[T]) InsertMany(ctx interface{}, models interface{}) *MockRepository_InsertMany_Call[T] {
+func (_e *MockRepository_Expecter[T]) InsertMany(ctx any, models any) *MockRepository_InsertMany_Call[T] {
 	return &MockRepository_InsertMany_Call[T]{Call: _e.mock.On("InsertMany", ctx, models)}
 }
 
@@ -523,7 +523,7 @@ type MockRepository_SaveMany_Call[T any] struct {
 // SaveMany is a helper method to define mock.On call
 //   - ctx context.Context
 //   - models []T
-func (_e *MockRepository_Expecter[T]) SaveMany(ctx interface{}, models interface{}) *MockRepository_SaveMany_Call[T] {
+func (_e *MockRepository_Expecter[T]) SaveMany(ctx any, models any) *MockRepository_SaveMany_Call[T] {
 	return &MockRepository_SaveMany_Call[T]{Call: _e.mock.On("SaveMany", ctx, models)}
 }
 
@@ -591,7 +591,7 @@ type MockRepository_Update_Call[T any] struct {
 // Update is a helper method to define mock.On call
 //   - ctx context.Context
 //   - model T
-func (_e *MockRepository_Expecter[T]) Update(ctx interface{}, model interface{}) *MockRepository_Update_Call[T] {
+func (_e *MockRepository_Expecter[T]) Update(ctx any, model any) *MockRepository_Update_Call[T] {
 	return &MockRepository_Update_Call[T]{Call: _e.mock.On("Update", ctx, model)}
 }
 

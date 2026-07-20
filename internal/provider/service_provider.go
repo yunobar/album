@@ -10,6 +10,7 @@ import (
 	"github.com/yunobar/album/internal/core/cache"
 	"github.com/yunobar/album/internal/core/config"
 	"github.com/yunobar/album/internal/core/otel"
+	"github.com/yunobar/album/internal/core/pubsub"
 	"github.com/yunobar/album/internal/domain/client"
 	"github.com/yunobar/album/internal/domain/service"
 )
@@ -30,6 +31,9 @@ type Services struct {
 
 	// Groups
 	Group service.GroupService
+
+	// Decision Engine
+	DecisionSession service.DecisionSessionService
 }
 
 func (s *Services) Shutdown() error {
@@ -52,6 +56,19 @@ func ProvideServices(
 
 	watchlist := service.NewWatchlistService(repos.Transactor, repos.Watchlist, repos.Content)
 	group := service.NewGroupService(repos.Transactor, repos.Group, repos.GroupMember, repos.Profile)
+	decisionSession := service.NewDecisionSessionService(
+		repos.Transactor,
+		repos.DecisionSession,
+		repos.SessionParticipant,
+		repos.SessionCandidate,
+		repos.GroupMember,
+		repos.Group,
+		repos.Watchlist,
+		repos.SessionPrioritySnapshot,
+		repos.SessionVote,
+		repos.SessionRanking,
+		pubsub.NewPublisher(coreSvc.NATSConn),
+	)
 
 	return &Services{
 		AuthKit: kit,
@@ -64,6 +81,8 @@ func ProvideServices(
 		Watchlist: watchlist,
 
 		Group: group,
+
+		DecisionSession: decisionSession,
 	}, nil
 }
 
